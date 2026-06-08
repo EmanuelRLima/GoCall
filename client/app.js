@@ -13,6 +13,8 @@ let recordingContext = null;
 let recordingAnimationFrame = null;
 let recordingAudioContext = null;
 let roomIsRecording = false;
+let lastRecordingResult = null;
+let recordingUploadResolve = null;
 
 const peerConnections = new Map();
 
@@ -255,6 +257,9 @@ async function enterRoom(room, peers) {
     for (const peerId of peers) {
       await startCallTo(peerId);
     }
+    if (isInterpreter) {
+      setTimeout(() => startRecording(), 1000);
+    }
   } catch (error) {
     showLobbyStatus('Erro ao entrar na sala: ' + error.message, 'error');
   }
@@ -335,6 +340,10 @@ function handlePeerLeft(peerId) {
   const pc = peerConnections.get(peerId);
   if (pc) { pc.close(); peerConnections.delete(peerId); }
   showStatus('Um participante saiu', 'info');
+
+  if (isEmbedMode && !isInterpreter && window.parent !== window && peerConnections.size === 0) {
+    window.parent.postMessage({ type: 'webrtc-hangup', recording_url: null, reason: 'peer_disconnected' }, '*');
+  }
 }
 
 function sendMessage(msg) {
@@ -535,34 +544,63 @@ async function uploadRecording(blob) {
     const result = await response.json();
 
     if (response.ok) {
+      lastRecordingResult = { url: result.url, key: result.key };
       showStatus('Gravação enviada para S3 com sucesso!', 'success');
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `recording_${currentRoom}_${Date.now()}.webm`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+
+      if (!isEmbedMode) {
+        const blobUrl = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = `recording_${currentRoom}_${Date.now()}.webm`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(blobUrl);
+      }
+
+      if (recordingUploadResolve) {
+        recordingUploadResolve(lastRecordingResult);
+        recordingUploadResolve = null;
+      }
+      return lastRecordingResult;
     } else {
       showStatus('Erro ao enviar gravação: ' + result.error, 'error');
+      if (recordingUploadResolve) {
+        recordingUploadResolve(null);
+        recordingUploadResolve = null;
+      }
+      return null;
     }
   } catch (error) {
     showStatus('Erro ao enviar gravação: ' + error.message, 'error');
+    if (recordingUploadResolve) {
+      recordingUploadResolve(null);
+      recordingUploadResolve = null;
+    }
+    return null;
   }
 }
 
 const isEmbedMode = new URLSearchParams(window.location.search).get('mode') === 'embed';
+const isInterpreter = new URLSearchParams(window.location.search).get('role') === 'interprete';
 
 if (isEmbedMode) {
-  // No modo embed, esconde a tela de lobby — vai direto para a sala
   document.body.style.background = 'transparent';
   if (lobbyEl) lobbyEl.style.display = 'none';
+  if (recordBtn) recordBtn.style.display = 'none';
 }
 
-function hangup() {
+async function hangup() {
+  let recordingResult = null;
+
   if (isRecording) {
-    stopRecording();
+    showStatus('Finalizando gravação, aguarde...', 'info');
+    recordingResult = await new Promise((resolve) => {
+      recordingUploadResolve = resolve;
+      stopRecording();
+    });
+  } else {
+    recordingResult = lastRecordingResult;
   }
 
   if (recordingAnimationFrame) {
@@ -575,6 +613,7 @@ function hangup() {
   }
   isRecording = false;
   roomIsRecording = false;
+  lastRecordingResult = null;
   recordBtn.disabled = false;
   recordBtn.style.opacity = '1';
   recordBtn.classList.remove('recording');
@@ -602,10 +641,13 @@ function hangup() {
   currentRoom = null;
   roomEl.classList.add('hidden');
 
-  // Notifica o pai (iLibras) que a chamada foi encerrada
   if (isEmbedMode && window.parent !== window) {
-    window.parent.postMessage({ type: 'webrtc-hangup' }, '*');
-    return; // não mostra lobby no modo embed
+    window.parent.postMessage({
+      type: 'webrtc-hangup',
+      recording_url: recordingResult ? recordingResult.url : null,
+      recording_key: recordingResult ? recordingResult.key : null
+    }, '*');
+    return;
   }
 
   lobbyEl.classList.remove('hidden');

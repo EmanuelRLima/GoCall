@@ -295,9 +295,14 @@ app.post('/api/upload-recording', upload.single('recording'), async (req, res) =
 
     const result = await upload.done();
 
+    const region = process.env.AWS_REGION || 'us-east-1';
+    const bucket = process.env.AWS_S3_BUCKET;
+    const s3Url = result.Location ||
+      `https://${bucket}.s3.${region}.amazonaws.com/${fileName}`;
+
     res.json({
       success: true,
-      url: result.Location,
+      url: s3Url,
       key: fileName
     });
   } catch (error) {
