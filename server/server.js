@@ -248,23 +248,33 @@ const heartbeatInterval = setInterval(() => {
   });
 }, 5000);
 
-app.post('/api/upload-recording', upload.single('recording'), async (req, res) => {
-  const inputPath  = path.join(tmpdir(), `${randomUUID()}.webm`);
-  const outputPath = path.join(tmpdir(), `${randomUUID()}.mp4`);
+// Notifica o iLibras_v2 (server-to-server) quando a gravação termina de processar,
+// para o vídeo ser anexado ao atendimento sem depender da aba do atendente continuar aberta.
+async function notificarWebhook(payload) {
+  const url = process.env.ILIBRAS_WEBHOOK_URL;
+  const token = process.env.ILIBRAS_WEBHOOK_TOKEN;
+  if (!url) return;
 
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    // Grava o buffer em disco para o FFmpeg processar
-    await new Promise((resolve, reject) => {
-      const ws = createWriteStream(inputPath);
-      ws.on('finish', resolve);
-      ws.on('error', reject);
-      ws.end(req.file.buffer);
+    const resp = await fetch(`${url.replace(/\/$/, '')}/api/webhooks/gocall/gravacao`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Webhook-Token': token || ''
+      },
+      body: JSON.stringify(payload)
     });
+    if (!resp.ok) {
+      console.error(`Webhook iLibras respondeu ${resp.status}:`, await resp.text());
+    }
+  } catch (error) {
+    console.error('Falha ao notificar webhook iLibras:', error.message);
+  }
+}
 
+// Transcodifica e envia ao S3 em background — não bloqueia a resposta ao navegador.
+async function processarGravacao(inputPath, outputPath, roomId, timestamp) {
+  try {
     // Transcodifica WebM (Opus) → MP4 (AAC) usando FFmpeg
     await new Promise((resolve, reject) => {
       ffmpeg(inputPath)
@@ -280,7 +290,6 @@ app.post('/api/upload-recording', upload.single('recording'), async (req, res) =
         .run();
     });
 
-    const { roomId, timestamp } = req.body;
     const fileName = `${process.env.S3_RECORDINGS_FOLDER || 'webrtc-recordings/'}${roomId}_${timestamp}.mp4`;
 
     const upload = new Upload({
@@ -300,18 +309,48 @@ app.post('/api/upload-recording', upload.single('recording'), async (req, res) =
     const s3Url = result.Location ||
       `https://${bucket}.s3.${region}.amazonaws.com/${fileName}`;
 
-    res.json({
-      success: true,
-      url: s3Url,
-      key: fileName
-    });
+    await notificarWebhook({ room: roomId, video_url: s3Url, video_key: fileName });
   } catch (error) {
-    res.status(500).json({
-      error: 'Failed to upload recording',
-      message: error.message
-    });
+    console.error(`Erro ao processar gravação da sala ${roomId}:`, error);
+    await notificarWebhook({ room: roomId, error: error.message });
   } finally {
-    // Limpa arquivos temporários
+    for (const p of [inputPath, outputPath]) {
+      unlink(p, () => {});
+    }
+  }
+}
+
+app.post('/api/upload-recording', upload.single('recording'), async (req, res) => {
+  const inputPath  = path.join(tmpdir(), `${randomUUID()}.webm`);
+  const outputPath = path.join(tmpdir(), `${randomUUID()}.mp4`);
+
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    // Grava o buffer em disco — a partir daqui o arquivo já está seguro no servidor
+    await new Promise((resolve, reject) => {
+      const ws = createWriteStream(inputPath);
+      ws.on('finish', resolve);
+      ws.on('error', reject);
+      ws.end(req.file.buffer);
+    });
+
+    const { roomId, timestamp } = req.body;
+
+    // Responde imediatamente: o atendente não precisa esperar o FFmpeg + upload ao S3.
+    res.json({ success: true, status: 'processing', room: roomId });
+
+    // Processamento pesado continua em background, independente da conexão do navegador.
+    processarGravacao(inputPath, outputPath, roomId, timestamp);
+  } catch (error) {
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: 'Failed to upload recording',
+        message: error.message
+      });
+    }
     for (const p of [inputPath, outputPath]) {
       unlink(p, () => {});
     }

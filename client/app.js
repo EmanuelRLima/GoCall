@@ -15,6 +15,7 @@ let recordingAudioContext = null;
 let roomIsRecording = false;
 let lastRecordingResult = null;
 let recordingUploadResolve = null;
+let isUploadingRecording = false;
 
 const peerConnections = new Map();
 
@@ -494,7 +495,7 @@ async function startRecording() {
         const mimeType = mediaRecorder.mimeType || 'video/mp4';
       const blob = new Blob(recordedChunks, { type: mimeType });
         const duration = Date.now() - recordingStartTime;
-        showStatus(`Gravação finalizada (${Math.round(duration/1000)}s). Enviando para S3...`, 'info');
+        showStatus(`Gravação finalizada (${Math.round(duration/1000)}s). Enviando vídeo, não feche esta janela...`, 'info');
         await uploadRecording(blob);
         recordingCanvas = null;
         recordingContext = null;
@@ -529,6 +530,7 @@ function stopRecording() {
 }
 
 async function uploadRecording(blob) {
+  isUploadingRecording = true;
   try {
     const formData = new FormData();
     const extension = mediaRecorder && mediaRecorder.mimeType && mediaRecorder.mimeType.includes('webm') ? 'webm' : 'mp4';
@@ -544,8 +546,11 @@ async function uploadRecording(blob) {
     const result = await response.json();
 
     if (response.ok) {
-      lastRecordingResult = { url: result.url, key: result.key };
-      showStatus('Gravação enviada para S3 com sucesso!', 'success');
+      // O servidor já respondeu ao receber o arquivo bruto — o processamento
+      // (transcodificação + envio ao S3) continua em segundo plano no servidor
+      // e o vídeo é anexado ao atendimento automaticamente quando terminar.
+      lastRecordingResult = { url: result.url ?? null, key: result.key ?? null };
+      showStatus('Gravação recebida. Processamento continua em segundo plano.', 'success');
 
       if (!isEmbedMode) {
         const blobUrl = URL.createObjectURL(blob);
@@ -578,8 +583,16 @@ async function uploadRecording(blob) {
       recordingUploadResolve = null;
     }
     return null;
+  } finally {
+    isUploadingRecording = false;
   }
 }
+
+window.addEventListener('beforeunload', (e) => {
+  if (!isUploadingRecording) return;
+  e.preventDefault();
+  e.returnValue = '';
+});
 
 const isEmbedMode = new URLSearchParams(window.location.search).get('mode') === 'embed';
 const isInterpreter = new URLSearchParams(window.location.search).get('role') === 'interprete';
@@ -594,7 +607,7 @@ async function hangup() {
   let recordingResult = null;
 
   if (isRecording) {
-    showStatus('Finalizando gravação, aguarde...', 'info');
+    showStatus('Enviando gravação, não feche esta janela...', 'info');
     recordingResult = await new Promise((resolve) => {
       recordingUploadResolve = resolve;
       stopRecording();
