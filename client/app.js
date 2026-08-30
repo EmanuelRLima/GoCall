@@ -342,8 +342,12 @@ function handlePeerLeft(peerId) {
   if (pc) { pc.close(); peerConnections.delete(peerId); }
   showStatus('Um participante saiu', 'info');
 
-  if (isEmbedMode && !isInterpreter && window.parent !== window && peerConnections.size === 0) {
-    window.parent.postMessage({ type: 'webrtc-hangup', recording_url: null, reason: 'peer_disconnected' }, '*');
+  // Sobrou sozinho na sala: encerra de verdade em vez de deixar a chamada
+  // pendurada. Passa pelo hangup() para que a gravação seja finalizada e
+  // enviada antes de avisar a página que embute o GoCall — quem grava é o
+  // intérprete, então sair pela porta dos fundos custaria o vídeo.
+  if (isEmbedMode && window.parent !== window && peerConnections.size === 0) {
+    hangup('peer_disconnected');
   }
 }
 
@@ -603,7 +607,7 @@ if (isEmbedMode) {
   if (recordBtn) recordBtn.style.display = 'none';
 }
 
-async function hangup() {
+async function hangup(motivo = 'manual') {
   let recordingResult = null;
 
   if (isRecording) {
@@ -657,6 +661,7 @@ async function hangup() {
   if (isEmbedMode && window.parent !== window) {
     window.parent.postMessage({
       type: 'webrtc-hangup',
+      reason: motivo,
       recording_url: recordingResult ? recordingResult.url : null,
       recording_key: recordingResult ? recordingResult.key : null
     }, '*');
@@ -695,6 +700,8 @@ roomIdInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !joinBtn
 muteBtn.addEventListener('click', toggleAudio);
 videoBtn.addEventListener('click', toggleVideo);
 recordBtn.addEventListener('click', toggleRecording);
-hangupBtn.addEventListener('click', hangup);
+// Envolvido numa arrow de propósito: passar hangup direto faria o objeto de
+// evento do clique chegar como motivo.
+hangupBtn.addEventListener('click', () => hangup('manual'));
 
 connectWebSocket();
