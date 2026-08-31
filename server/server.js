@@ -76,6 +76,40 @@ const rooms = new Map();
 
 const clientRoom = new Map();
 
+// Quem é quem na sala. O rótulo vem do papel que a página informa ao entrar
+// (intérprete, suporte, surdo) — é o que aparece no tile e no chat, no lugar
+// do id sorteado, que não diz nada para quem está do outro lado.
+const clientRotulo = new Map();
+
+const ROTULOS = {
+  interprete: 'Intérprete',
+  suporte:    'Suporte',
+  surdo:      'Surdo',
+};
+
+const CHAT_MAX_CARACTERES = 2000;
+// A página do surdo é pública, então o WebSocket aceita conexão de qualquer um.
+// Uma janela simples evita que um cliente sozinho inunde a sala.
+const CHAT_JANELA_MS = 5000;
+const CHAT_MAX_NA_JANELA = 12;
+const chatHistorico = new Map();
+
+function rotuloDe(papel) {
+  return ROTULOS[String(papel || '').toLowerCase()] || 'Participante';
+}
+
+function podeMandarChat(clientId) {
+  const agora = Date.now();
+  const recentes = (chatHistorico.get(clientId) || []).filter(t => agora - t < CHAT_JANELA_MS);
+  if (recentes.length >= CHAT_MAX_NA_JANELA) {
+    chatHistorico.set(clientId, recentes);
+    return false;
+  }
+  recentes.push(agora);
+  chatHistorico.set(clientId, recentes);
+  return true;
+}
+
 wss.on('connection', (ws) => {
   const clientId = generateId();
   clients.set(clientId, ws);
@@ -123,11 +157,18 @@ wss.on('connection', (ws) => {
           const existingMembers = Array.from(room);
           room.add(clientId);
           clientRoom.set(clientId, roomId);
+          clientRotulo.set(clientId, rotuloDe(data.papel));
+
+          // peers continua sendo a lista de ids; os rótulos vão à parte para
+          // não quebrar quem já consome esse formato.
+          const rotulos = {};
+          for (const peerId of existingMembers) rotulos[peerId] = clientRotulo.get(peerId) || 'Participante';
 
           ws.send(JSON.stringify({
             type: 'room-joined',
             room: roomId,
-            peers: existingMembers
+            peers: existingMembers,
+            rotulos
           }));
 
           for (const peerId of existingMembers) {
@@ -136,7 +177,8 @@ wss.on('connection', (ws) => {
               peerWs.send(JSON.stringify({
                 type: 'peer-joined',
                 peerId: clientId,
-                room: roomId
+                room: roomId,
+                rotulo: clientRotulo.get(clientId)
               }));
             }
           }
@@ -168,6 +210,31 @@ wss.on('connection', (ws) => {
             }
             if (room.size === 0) rooms.delete(leaveRoomId);
             clientRoom.delete(clientId);
+          }
+          break;
+        }
+
+        case 'chat': {
+          const roomId = clientRoom.get(clientId);
+          if (!roomId || !rooms.has(roomId)) break;
+
+          const texto = String(data.texto ?? '').trim().slice(0, CHAT_MAX_CARACTERES);
+          if (!texto) break;
+          if (!podeMandarChat(clientId)) break;
+
+          // Volta também para quem enviou: assim todo mundo renderiza a partir
+          // da mesma fonte e a ordem das mensagens é a mesma em todas as telas.
+          const mensagem = JSON.stringify({
+            type: 'chat',
+            de: clientId,
+            rotulo: clientRotulo.get(clientId) || 'Participante',
+            texto,
+            em: Date.now()
+          });
+
+          for (const peerId of rooms.get(roomId)) {
+            const peerWs = clients.get(peerId);
+            if (peerWs) peerWs.send(mensagem);
           }
           break;
         }
@@ -229,6 +296,8 @@ wss.on('connection', (ws) => {
     }
 
     clientRoom.delete(clientId);
+    clientRotulo.delete(clientId);
+    chatHistorico.delete(clientId);
     clients.delete(clientId);
   });
 });

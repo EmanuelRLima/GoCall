@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WebRTC — Sala de Vídeo</title>
-  <link rel="stylesheet" href="style.css?v=8">
+  <link rel="stylesheet" href="style.css?v=9">
 </head>
 <body>
   <!-- Tela de entrada -->
@@ -23,13 +23,34 @@
 
   <!-- Sala de vídeo -->
   <div id="room" class="hidden">
-    <div id="videosGrid"></div>
+    <div id="palco">
+      <!-- areaVideo existe só para servir de referência às container queries do
+           grid: com o chat aberto o espaço do vídeo muda, e é esse espaço, não
+           o da janela, que decide se os quadros ficam lado a lado ou empilhados. -->
+      <div id="areaVideo">
+        <div id="videosGrid"></div>
+      </div>
+
+      <aside id="chat" class="hidden" aria-label="Chat da chamada">
+        <div class="chat-topo">
+          <span>Chat da chamada</span>
+          <button id="chatFecharBtn" class="chat-fechar" title="Fechar chat" aria-label="Fechar chat">✕</button>
+        </div>
+        <div id="chatMensagens" role="log" aria-live="polite"></div>
+        <form id="chatForm" autocomplete="off">
+          <input id="chatTexto" type="text" maxlength="2000" aria-label="Mensagem"
+                 placeholder="Escreva uma mensagem">
+          <button type="submit" title="Enviar">Enviar</button>
+        </form>
+      </aside>
+    </div>
 
     <div class="room-bar">
       <span id="roomLabel" class="room-name"></span>
       <div class="room-controls">
         <button id="muteBtn" class="ctrl-btn" title="Microfone">🎤</button>
         <button id="videoBtn" class="ctrl-btn" title="Câmera">📹</button>
+        <button id="chatBtn" class="ctrl-btn" title="Chat" aria-label="Abrir chat">💬<span id="chatBadge" class="chat-badge hidden">0</span></button>
         <button id="recordBtn" class="ctrl-btn" title="Gravar">⏺️</button>
         <button id="hangupBtn" class="ctrl-btn danger" title="Sair">📞</button>
       </div>
@@ -37,6 +58,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=8"></script>
+  <script src="app.js?v=9"></script>
 </body>
 </html>

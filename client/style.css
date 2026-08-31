@@ -105,6 +105,26 @@ body {
   display: none !important;
 }
 
+/* Palco: área de vídeo e chat dividem o espaço acima da barra. */
+#palco {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* O container query do grid mede ESTA caixa, não a janela: abrir o chat muda
+   o espaço disponível para o vídeo, e é esse espaço que decide se os quadros
+   cabem lado a lado. Com media query o layout continuaria decidindo pela
+   janela e escolheria errado sempre que o chat estivesse aberto. */
+#areaVideo {
+  flex: 1;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  container-type: size;
+}
+
 /* Grid dinâmico de vídeos
    As células ocupam todo o espaço disponível (1fr) em vez de terem largura
    fixa calculada em vw/vh: com tile quadrado sobrava metade da tela vazia em
@@ -151,7 +171,7 @@ body {
    com largura W/2; empilhados, saem com 16/9 * H/2. Empilhar rende mais em
    tudo que for mais estreito que 16:9 — o iframe do painel do intérprete e o
    celular do surdo caem os dois nesse caso. */
-@media (max-aspect-ratio: 16 / 9) {
+@container (max-aspect-ratio: 16 / 9) {
   #videosGrid[data-count="2"] {
     grid-template-columns: 1fr;
     grid-template-rows: repeat(2, 1fr);
@@ -178,7 +198,7 @@ body {
 }
 
 /* Mais estreito que quadrado: nem duas colunas compensam. */
-@media (max-aspect-ratio: 1 / 1) {
+@container (max-aspect-ratio: 1 / 1) {
   #videosGrid[data-count="3"] {
     grid-template-columns: 1fr;
     grid-template-rows: repeat(3, 1fr);
@@ -324,5 +344,187 @@ body {
 
   .room-name {
     display: none;
+  }
+}
+
+/* ── CHAT ───────────────────────────────────────── */
+#chat {
+  width: 320px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  background: #1a1a2e;
+  border-left: 1px solid #2c2c4a;
+  min-height: 0;
+}
+
+.chat-topo {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #ccc;
+  border-bottom: 1px solid #2c2c4a;
+  flex-shrink: 0;
+}
+
+.chat-fechar {
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+
+.chat-fechar:hover {
+  background: #2c2c4a;
+  color: #fff;
+}
+
+#chatMensagens {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+.chat-vazio {
+  color: #666;
+  font-size: 13px;
+  text-align: center;
+  margin: auto 0;
+  line-height: 1.5;
+}
+
+.chat-msg {
+  max-width: 85%;
+  padding: 7px 11px;
+  border-radius: 12px;
+  background: #2c2c4a;
+  align-self: flex-start;
+  word-break: break-word;
+}
+
+.chat-msg.propria {
+  align-self: flex-end;
+  background: #4a4a7c;
+}
+
+.chat-msg .chat-autor {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #9aa4d8;
+  margin-bottom: 2px;
+}
+
+.chat-msg .chat-texto {
+  font-size: 14px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+}
+
+.chat-msg .chat-hora {
+  display: block;
+  font-size: 10px;
+  color: #8a8aa0;
+  margin-top: 3px;
+  text-align: right;
+}
+
+/* Aviso de entrada/saída no meio do fluxo. */
+.chat-evento {
+  align-self: center;
+  font-size: 11px;
+  color: #777;
+  background: #22223a;
+  padding: 3px 10px;
+  border-radius: 10px;
+}
+
+#chatForm {
+  display: flex;
+  gap: 6px;
+  padding: 10px;
+  border-top: 1px solid #2c2c4a;
+  flex-shrink: 0;
+}
+
+#chatTexto {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 12px;
+  border: 1px solid #3a3a5c;
+  border-radius: 20px;
+  background: #12121f;
+  color: #fff;
+  /* 16px evita o zoom automático do iOS ao focar o campo. */
+  font-size: 16px;
+  outline: none;
+}
+
+#chatTexto:focus {
+  border-color: #667eea;
+}
+
+#chatForm button {
+  padding: 9px 16px;
+  border: none;
+  border-radius: 20px;
+  background: #667eea;
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+#chatForm button:hover {
+  background: #5568d3;
+}
+
+/* Contador de não lidas no botão da barra. */
+#chatBtn {
+  position: relative;
+}
+
+.chat-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 10px;
+  background: #dc3545;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: pulse-recording 1.5s ease-in-out infinite;
+}
+
+/* Retrato: o chat vai para baixo do vídeo em vez de roubar largura, que é o
+   que falta na vertical. Altura em % para sobrar vídeo em tela pequena. */
+@media (max-aspect-ratio: 1 / 1) {
+  #palco {
+    flex-direction: column;
+  }
+
+  #chat {
+    width: auto;
+    height: 45%;
+    min-height: 170px;
+    border-left: none;
+    border-top: 1px solid #2c2c4a;
   }
 }

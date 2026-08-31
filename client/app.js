@@ -129,6 +129,136 @@ const recordBtn   = document.getElementById('recordBtn');
 const hangupBtn   = document.getElementById('hangupBtn');
 const statusElement = document.getElementById('status');
 
+const chatEl         = document.getElementById('chat');
+const chatBtn        = document.getElementById('chatBtn');
+const chatBadge      = document.getElementById('chatBadge');
+const chatFecharBtn  = document.getElementById('chatFecharBtn');
+const chatMensagens  = document.getElementById('chatMensagens');
+const chatForm       = document.getElementById('chatForm');
+const chatTexto      = document.getElementById('chatTexto');
+
+// Rótulo de cada participante ('Intérprete', 'Surdo', 'Suporte'), vindo do
+// servidor. Substitui o pedaço do id que aparecia no tile e não dizia nada.
+const peerRotulos = new Map();
+let chatAberto = false;
+let chatNaoLidas = 0;
+
+
+// Mesmo de-para que o servidor aplica ao 'papel' recebido no join-room. Aqui
+// serve só para o próprio tile, que é desenhado antes do servidor responder.
+function rotuloDoPapel(papel) {
+  const mapa = { interprete: 'Intérprete', suporte: 'Suporte', surdo: 'Surdo' };
+  return mapa[String(papel || '').toLowerCase()] || '';
+}
+
+function abrirChat() {
+  chatAberto = true;
+  chatEl.classList.remove('hidden');
+  chatNaoLidas = 0;
+  atualizarBadge();
+  chatMensagens.scrollTop = chatMensagens.scrollHeight;
+}
+
+function fecharChat() {
+  chatAberto = false;
+  chatEl.classList.add('hidden');
+}
+
+function alternarChat() {
+  if (chatAberto) fecharChat(); else abrirChat();
+}
+
+function atualizarBadge() {
+  chatBadge.textContent = chatNaoLidas > 9 ? '9+' : String(chatNaoLidas);
+  chatBadge.classList.toggle('hidden', chatNaoLidas === 0);
+}
+
+function limparChat() {
+  chatMensagens.innerHTML = '';
+  chatNaoLidas = 0;
+  atualizarBadge();
+  fecharChat();
+  mostrarVazioSeVazio();
+}
+
+function mostrarVazioSeVazio() {
+  if (chatMensagens.children.length) return;
+  const vazio = document.createElement('p');
+  vazio.className = 'chat-vazio';
+  vazio.textContent = 'Nenhuma mensagem ainda. Escreva abaixo para falar com quem está na chamada.';
+  chatMensagens.appendChild(vazio);
+}
+
+function tirarVazio() {
+  const vazio = chatMensagens.querySelector('.chat-vazio');
+  if (vazio) vazio.remove();
+}
+
+// Rola só se já estava no fim: senão quem subiu para reler uma mensagem seria
+// puxado de volta a cada chegada.
+function rolarChatSePerto() {
+  const distanciaDoFim = chatMensagens.scrollHeight - chatMensagens.scrollTop - chatMensagens.clientHeight;
+  if (distanciaDoFim < 80) chatMensagens.scrollTop = chatMensagens.scrollHeight;
+}
+
+function horaCurta(ms) {
+  return new Date(ms).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+}
+
+function adicionarEventoChat(texto) {
+  tirarVazio();
+  const el = document.createElement('div');
+  el.className = 'chat-evento';
+  el.textContent = texto;
+  chatMensagens.appendChild(el);
+  rolarChatSePerto();
+}
+
+function receberMensagemChat(dados) {
+  tirarVazio();
+
+  const propria = dados.de === myId;
+  const el = document.createElement('div');
+  el.className = 'chat-msg' + (propria ? ' propria' : '');
+
+  const autor = document.createElement('span');
+  autor.className = 'chat-autor';
+  autor.textContent = propria ? 'Você' : (dados.rotulo || 'Participante');
+
+  // textContent e nunca innerHTML: o texto vem de outro participante e a sala
+  // do surdo é pública, então qualquer um pode digitar o que quiser aqui.
+  const corpo = document.createElement('span');
+  corpo.className = 'chat-texto';
+  corpo.textContent = dados.texto;
+
+  const hora = document.createElement('span');
+  hora.className = 'chat-hora';
+  hora.textContent = horaCurta(dados.em || Date.now());
+
+  el.appendChild(autor);
+  el.appendChild(corpo);
+  el.appendChild(hora);
+  chatMensagens.appendChild(el);
+
+  // Mensagem que chega com o chat fechado abre o painel. Aviso sonoro não
+  // serve para quem é surdo, e um contador discreto passa despercebido no
+  // meio de uma conversa em sinais — aqui precisa aparecer.
+  if (!chatAberto && !propria) abrirChat();
+
+  rolarChatSePerto();
+}
+
+function enviarMensagemChat(evento) {
+  evento.preventDefault();
+  const texto = chatTexto.value.trim();
+  if (!texto || !currentRoom) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    adicionarEventoChat('Sem conexão com o servidor. Mensagem não enviada.');
+    return;
+  }
+  sendMessage({ type: 'chat', texto });
+  chatTexto.value = '';
+}
 
 function createTile(id, label, stream, isLocal) {
   const tile = document.createElement('div');
@@ -216,6 +346,7 @@ function connectWebSocket() {
 
 
         case 'room-joined':
+          for (const [id, rotulo] of Object.entries(data.rotulos || {})) peerRotulos.set(id, rotulo);
           await enterRoom(data.room, data.peers.filter(id => id !== myId));
           break;
 
@@ -225,7 +356,9 @@ function connectWebSocket() {
           break;
 
         case 'peer-joined':
+          if (data.rotulo) peerRotulos.set(data.peerId, data.rotulo);
           showStatus(`Novo participante entrando...`, 'info');
+          adicionarEventoChat((data.rotulo || 'Participante') + ' entrou na chamada');
           break;
 
         case 'peer-left':
@@ -244,12 +377,16 @@ function connectWebSocket() {
           await handleIceCandidate(data);
           break;
 
+        case 'chat':
+          receberMensagemChat(data);
+          break;
+
         case 'recording-started':
           if (data.recorderId !== myId) {
             roomIsRecording = true;
             recordBtn.disabled = true;
             recordBtn.style.opacity = '0.5';
-            showStatus(`${data.recorderId.substring(0, 6)} está gravando...`, 'info');
+            showStatus((peerRotulos.get(data.recorderId) || 'Outro participante') + ' está gravando...', 'info');
           }
           break;
 
@@ -347,12 +484,15 @@ async function joinRoom() {
   roomEl.classList.remove('hidden');
   videosGrid.innerHTML = '';
   peerTiles.clear();
+  peerRotulos.clear();
   updateGridCount();
-  const localTile = createTile(myId, 'Você', localStream, true);
+  const rotuloProprio = rotuloDoPapel(papelNaChamada);
+  const localTile = createTile(myId, rotuloProprio ? 'Você (' + rotuloProprio + ')' : 'Você', localStream, true);
   peerTiles.set(myId, localTile);
 
   currentRoom = room;
-  sendMessage({ type: 'join-room', room });
+  limparChat();
+  sendMessage({ type: 'join-room', room, papel: papelNaChamada });
   showLobbyStatus('Entrando na sala...', 'info');
 }
 
@@ -385,7 +525,7 @@ function createPeerConnection(peerId) {
   pc.ontrack = (event) => {
     let tile = peerTiles.get(peerId);
     if (!tile) {
-      tile = createTile(peerId, peerId.substring(0, 6), null, false);
+      tile = createTile(peerId, peerRotulos.get(peerId) || 'Participante', null, false);
       peerTiles.set(peerId, tile);
     }
     setTileStream(tile, event.streams[0]);
@@ -442,6 +582,10 @@ async function handleIceCandidate(data) {
 }
 
 function handlePeerLeft(peerId) {
+  if (peerTiles.has(peerId)) {
+    adicionarEventoChat((peerRotulos.get(peerId) || 'Participante') + ' saiu da chamada');
+  }
+  peerRotulos.delete(peerId);
   removeTile(peerId);
   const pc = peerConnections.get(peerId);
   if (pc) { pc.close(); peerConnections.delete(peerId); }
@@ -717,6 +861,9 @@ window.addEventListener('beforeunload', (e) => {
 
 const isEmbedMode = new URLSearchParams(window.location.search).get('mode') === 'embed';
 const isInterpreter = new URLSearchParams(window.location.search).get('role') === 'interprete';
+// O papel vira o rótulo que os outros veem. Sem role na URL o servidor devolve
+// 'Participante', que ainda diz mais do que um pedaço do id.
+const papelNaChamada = new URLSearchParams(window.location.search).get('role') || '';
 
 if (isEmbedMode) {
   document.body.style.background = 'transparent';
@@ -820,5 +967,8 @@ recordBtn.addEventListener('click', toggleRecording);
 // Envolvido numa arrow de propósito: passar hangup direto faria o objeto de
 // evento do clique chegar como motivo.
 hangupBtn.addEventListener('click', () => hangup('manual'));
+chatBtn.addEventListener('click', alternarChat);
+chatFecharBtn.addEventListener('click', fecharChat);
+chatForm.addEventListener('submit', enviarMensagemChat);
 
 connectWebSocket();
