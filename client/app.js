@@ -28,6 +28,36 @@ const configuration = {
   ]
 };
 
+// Sem constraints o navegador escolhe sozinho, e a escolha costuma ser 4:3 em
+// baixa resolução. Em boa parte das webcams o 4:3 é o 16:9 recortado nas
+// laterais — some justamente a faixa onde as mãos do intérprete trabalham.
+// Tudo em 'ideal' de propósito: câmera que não atender entrega o que puder em
+// vez de estourar OverconstrainedError e deixar o atendimento sem vídeo.
+const VIDEO_CONSTRAINTS = {
+  width:       { ideal: 1280 },
+  height:      { ideal: 720 },
+  aspectRatio: { ideal: 16 / 9 },
+  frameRate:   { ideal: 30 }
+};
+
+// Muita câmera (e o driver do Windows) sobe com zoom digital aplicado,
+// fechando o enquadramento no rosto. Quando a track expõe a capability de
+// zoom, puxamos para o mínimo: é o ângulo mais aberto que o hardware dá.
+async function abrirAnguloMaximo(stream) {
+  const track = stream && stream.getVideoTracks()[0];
+  if (!track || typeof track.getCapabilities !== 'function') return;
+
+  try {
+    const caps = track.getCapabilities();
+    if (caps.zoom && typeof caps.zoom.min === 'number') {
+      await track.applyConstraints({ advanced: [{ zoom: caps.zoom.min }] });
+    }
+  } catch (e) {
+    // Firefox não implementa getCapabilities e alguns drivers recusam o
+    // applyConstraints. Sem zoom out, mas com vídeo: seguimos com o padrão.
+  }
+}
+
 
 const lobbyEl     = document.getElementById('lobby');
 const roomEl      = document.getElementById('room');
@@ -232,11 +262,17 @@ async function joinRoom() {
       localStream.getTracks().forEach(t => t.stop());
       localStream = null;
     }
-    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    localStream = await navigator.mediaDevices.getUserMedia({ video: VIDEO_CONSTRAINTS, audio: true });
   } catch (error) {
-    showLobbyStatus('Falha ao acessar câmera/microfone', 'error');
-    return;
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    } catch (erroSemConstraints) {
+      showLobbyStatus('Falha ao acessar câmera/microfone', 'error');
+      return;
+    }
   }
+
+  await abrirAnguloMaximo(localStream);
 
   lobbyEl.classList.add('hidden');
   roomEl.classList.remove('hidden');
@@ -436,7 +472,19 @@ async function startRecording() {
             const y = row * tileHeight;
             
             try {
-              recordingContext.drawImage(video, x, y, tileWidth, tileHeight);
+              // Encaixa o quadro na célula preservando a proporção. O
+              // drawImage esticado deformava o vídeo (uma célula de 960x1080
+              // recebendo um 16:9), e sinal deformado é sinal ilegível na
+              // gravação, que é o registro do atendimento.
+              const larguraFonte = video.videoWidth || 16;
+              const alturaFonte  = video.videoHeight || 9;
+              const escala = Math.min(tileWidth / larguraFonte, tileHeight / alturaFonte);
+              const larguraDestino = larguraFonte * escala;
+              const alturaDestino  = alturaFonte * escala;
+              const xDestino = x + (tileWidth - larguraDestino) / 2;
+              const yDestino = y + (tileHeight - alturaDestino) / 2;
+
+              recordingContext.drawImage(video, xDestino, yDestino, larguraDestino, alturaDestino);
               const label = tile.querySelector('.tile-label');
               if (label) {
                 recordingContext.fillStyle = 'rgba(0, 0, 0, 0.7)';

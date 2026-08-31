@@ -105,36 +105,90 @@ body {
   display: none !important;
 }
 
-/* Grid dinâmico de vídeos */
+/* Grid dinâmico de vídeos
+   As células ocupam todo o espaço disponível (1fr) em vez de terem largura
+   fixa calculada em vw/vh: com tile quadrado sobrava metade da tela vazia em
+   pé e o vídeo saía pequeno. Quem cuida da proporção agora é o object-fit. */
 #videosGrid {
   flex: 1;
   display: grid;
   gap: 6px;
   padding: 6px;
-  align-content: center;
-  justify-content: center;
+  align-content: stretch;
+  justify-content: stretch;
+  min-height: 0;
+  min-width: 0;
   overflow: hidden;
 }
 
-/* Layouts por nº de tiles (incluindo o próprio) */
+/* Layouts por nº de tiles (incluindo o próprio) — paisagem */
 #videosGrid[data-count="1"] {
-  grid-template-columns: min(calc(100vw - 12px), calc(100vh - 82px));
+  grid-template-columns: 1fr;
+  grid-template-rows: 1fr;
 }
 
 #videosGrid[data-count="2"] {
-  grid-template-columns: repeat(2, min(calc((100vw - 18px) / 2), calc(100vh - 82px)));
+  grid-template-columns: repeat(2, 1fr);
+  grid-template-rows: 1fr;
 }
 
 #videosGrid[data-count="3"] {
-  grid-template-columns: repeat(3, min(calc((100vw - 24px) / 3), calc(100vh - 82px)));
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: 1fr;
 }
 
 #videosGrid[data-count="4"] {
-  grid-template-columns: repeat(2, min(calc((100vw - 18px) / 2), calc((100vh - 88px) / 2)));
+  grid-template-columns: repeat(2, 1fr);
+  grid-template-rows: repeat(2, 1fr);
 }
 
 #videosGrid[data-count="5"] {
-  grid-template-columns: repeat(3, min(calc((100vw - 24px) / 3), calc((100vh - 88px) / 2)));
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(2, 1fr);
+}
+
+/* Corte em 16:9, não em 1:1: para dois quadros 16:9 lado a lado, cada um sai
+   com largura W/2; empilhados, saem com 16/9 * H/2. Empilhar rende mais em
+   tudo que for mais estreito que 16:9 — o iframe do painel do intérprete e o
+   celular do surdo caem os dois nesse caso. */
+@media (max-aspect-ratio: 16 / 9) {
+  #videosGrid[data-count="2"] {
+    grid-template-columns: 1fr;
+    grid-template-rows: repeat(2, 1fr);
+  }
+
+  #videosGrid[data-count="3"] {
+    grid-template-columns: repeat(2, 1fr);
+    grid-template-rows: repeat(2, 1fr);
+  }
+
+  /* Com 3 na sala o terceiro fica sozinho na linha de baixo. Centraliza com a
+     largura de uma coluna (metade do grid menos meio gap) em vez de deixar o
+     buraco à direita — os três ficam do mesmo tamanho. */
+  #videosGrid[data-count="3"] .video-tile:nth-child(3) {
+    grid-column: 1 / -1;
+    width: calc(50% - 3px);
+    justify-self: center;
+  }
+
+  #videosGrid[data-count="5"] {
+    grid-template-columns: repeat(2, 1fr);
+    grid-template-rows: repeat(3, 1fr);
+  }
+}
+
+/* Mais estreito que quadrado: nem duas colunas compensam. */
+@media (max-aspect-ratio: 1 / 1) {
+  #videosGrid[data-count="3"] {
+    grid-template-columns: 1fr;
+    grid-template-rows: repeat(3, 1fr);
+  }
+
+  /* Empilhado não há linha órfã: desfaz a centralização da regra anterior. */
+  #videosGrid[data-count="3"] .video-tile:nth-child(3) {
+    grid-column: auto;
+    width: auto;
+  }
 }
 
 /* tile */
@@ -143,13 +197,16 @@ body {
   background: #222;
   border-radius: 10px;
   overflow: hidden;
-  aspect-ratio: 1 / 1;
+  min-width: 0;
+  min-height: 0;
 }
 
+/* contain, não cover: o tile deixou de ser quadrado e o cover recortava as
+   laterais do quadro 16:9 — exatamente onde ficam as mãos de quem sinaliza. */
 .video-tile video {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
   display: block;
 }
 
@@ -261,16 +318,6 @@ body {
 }
 
 @media (max-width: 600px) {
-  #videosGrid[data-count="3"],
-  #videosGrid[data-count="4"],
-  #videosGrid[data-count="5"] {
-    grid-template-columns: repeat(2, min(calc((100vw - 18px) / 2), calc((100vh - 88px) / 2)));
-  }
-
-  #videosGrid[data-count="3"] .video-tile:first-child {
-    grid-column: 1 / -1;
-  }
-
   .room-bar {
     justify-content: center;
   }
