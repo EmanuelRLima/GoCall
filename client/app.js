@@ -40,6 +40,61 @@ const VIDEO_CONSTRAINTS = {
   frameRate:   { ideal: 30 }
 };
 
+// Traduz a falha do getUserMedia para algo acionável. O que os navegadores
+// padronizam é o .name do erro; a mensagem que vem junto é técnica e em
+// inglês, então não serve para a tela de quem está atendendo.
+function descreverErroMidia(erro) {
+  switch (erro && erro.name) {
+    // Dispositivo existe e foi liberado, mas o sistema não conseguiu abrir:
+    // na prática é sempre outro app segurando a câmera. Vale para desktop e
+    // para Android; TrackStartError é o nome antigo do mesmo caso no Chrome.
+    case 'NotReadableError':
+    case 'TrackStartError':
+      return {
+        motivo: 'em_uso',
+        mensagem: 'Sua câmera ou microfone já está sendo usado por outro aplicativo. '
+                + 'Feche o outro programa (Teams, Meet, Zoom, app de câmera) e entre novamente.'
+      };
+
+    // O Firefox usa AbortError onde o Chrome usa NotReadableError, mas pela
+    // spec ele é o balde do "deu errado e não é nenhum dos outros". Trata
+    // como ocupado (é a causa comum) sem afirmar que é.
+    case 'AbortError':
+      return {
+        motivo: 'em_uso',
+        mensagem: 'Não foi possível iniciar a câmera ou o microfone. '
+                + 'Verifique se outro aplicativo está usando o dispositivo e entre novamente.'
+      };
+
+    case 'NotAllowedError':
+    case 'PermissionDeniedError':
+    case 'SecurityError':
+      return {
+        motivo: 'sem_permissao',
+        mensagem: 'Permissão de câmera/microfone negada. '
+                + 'Libere o acesso nas configurações do navegador e entre novamente.'
+      };
+
+    case 'NotFoundError':
+    case 'DevicesNotFoundError':
+      return {
+        motivo: 'sem_dispositivo',
+        mensagem: 'Nenhuma câmera ou microfone foi encontrado neste dispositivo.'
+      };
+
+    default:
+      return { motivo: 'falha', mensagem: 'Falha ao acessar câmera/microfone.' };
+  }
+}
+
+// Em modo embed o lobby fica escondido, então a mensagem acima não chegaria a
+// ninguém. Quem a exibe é a página do iLibras que embute o GoCall — e é ela
+// que recusa a chamada, devolvendo o atendimento para a fila.
+function avisarFalhaDeMidia(motivo, mensagem) {
+  if (!isEmbedMode || window.parent === window) return;
+  window.parent.postMessage({ type: 'webrtc-midia-indisponivel', motivo, mensagem }, '*');
+}
+
 // Muita câmera (e o driver do Windows) sobe com zoom digital aplicado,
 // fechando o enquadramento no rosto. Quando a track expõe a capability de
 // zoom, puxamos para o mínimo: é o ângulo mais aberto que o hardware dá.
@@ -264,10 +319,24 @@ async function joinRoom() {
     }
     localStream = await navigator.mediaDevices.getUserMedia({ video: VIDEO_CONSTRAINTS, audio: true });
   } catch (error) {
-    try {
-      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    } catch (erroSemConstraints) {
-      showLobbyStatus('Falha ao acessar câmera/microfone', 'error');
+    // Repetir sem constraints só resolve quando foi a constraint que não coube.
+    // Câmera ocupada, permissão negada ou ausência de dispositivo falham de novo
+    // igual, e aí o que precisa chegar à tela é o motivo real — não um genérico.
+    let falha = error;
+
+    if (error && (error.name === 'OverconstrainedError' || error.name === 'ConstraintNotSatisfiedError')) {
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+        falha = null;
+      } catch (erroSemConstraints) {
+        falha = erroSemConstraints;
+      }
+    }
+
+    if (falha) {
+      const { motivo, mensagem } = descreverErroMidia(falha);
+      showLobbyStatus(mensagem, 'error');
+      avisarFalhaDeMidia(motivo, mensagem);
       return;
     }
   }
