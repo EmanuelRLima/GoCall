@@ -973,13 +973,21 @@ async function hangup(motivo = 'manual', { encerrarSala = false } = {}) {
   currentRoom = null;
   roomEl.classList.add('hidden');
 
-  if (isEmbedMode && window.parent !== window) {
+  // Avisa a página que embute o GoCall mesmo fora do modo embed: é por este
+  // aviso que a tela do surdo troca a chamada pela avaliação na hora, em vez
+  // de esperar o intérprete terminar de preencher o feedback do outro lado.
+  if (window.parent !== window) {
     window.parent.postMessage({
       type: 'webrtc-hangup',
       reason: motivo,
       recording_url: recordingResult ? recordingResult.url : null,
       recording_key: recordingResult ? recordingResult.key : null
     }, '*');
+  }
+
+  // No embed quem cuida da tela é o pai; fora dele o GoCall ainda precisa
+  // mostrar alguma coisa a quem ficou.
+  if (isEmbedMode && window.parent !== window) {
     encerrando = false;
     return;
   }
