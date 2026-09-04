@@ -197,6 +197,28 @@ wss.on('connection', (ws) => {
           break;
         }
 
+        // Encerrar a chamada vale para a sala inteira: quem conduz o
+        // atendimento apertou "Encerrar" no iLibras_v2, e os outros não podem
+        // continuar numa chamada que já acabou. Só avisa — cada cliente sai
+        // pelo próprio hangup, que é onde a gravação é finalizada.
+        case 'end-call': {
+          const salaId = clientRoom.get(clientId);
+          if (!salaId || !rooms.has(salaId)) break;
+
+          for (const peerId of rooms.get(salaId)) {
+            if (peerId === clientId) continue;
+            const peerWs = clients.get(peerId);
+            if (peerWs) {
+              peerWs.send(JSON.stringify({
+                type: 'room-closed',
+                room: salaId,
+                por: clientRotulo.get(clientId) || 'Participante'
+              }));
+            }
+          }
+          break;
+        }
+
         case 'leave-room': {
           const leaveRoomId = clientRoom.get(clientId);
           if (leaveRoomId && rooms.has(leaveRoomId)) {

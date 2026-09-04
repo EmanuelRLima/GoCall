@@ -16,6 +16,13 @@ let roomIsRecording = false;
 let lastRecordingResult = null;
 let recordingUploadResolve = null;
 let isUploadingRecording = false;
+// Encerrar é caminho de mão única e reentrante: o end-call faz os peers
+// saírem, o handlePeerLeft chamaria hangup() de novo no meio do upload e a
+// gravação subiria duas vezes. O primeiro pedido manda; os outros voltam.
+let encerrando = false;
+// A sala foi encerrada por quem conduz o atendimento — não é uma saída
+// qualquer, então quem fica não volta para o formulário do lobby.
+let salaEncerrada = false;
 
 const peerConnections = new Map();
 
@@ -126,7 +133,8 @@ const roomLabel   = document.getElementById('roomLabel');
 const muteBtn     = document.getElementById('muteBtn');
 const videoBtn    = document.getElementById('videoBtn');
 const recordBtn   = document.getElementById('recordBtn');
-const hangupBtn   = document.getElementById('hangupBtn');
+const encerradaEl     = document.getElementById('encerrada');
+const encerradaTexto  = document.getElementById('encerradaTexto');
 const statusElement = document.getElementById('status');
 
 const chatEl         = document.getElementById('chat');
@@ -338,7 +346,9 @@ function connectWebSocket() {
           myIdElement.textContent = myId;
           // Auto-join quando o parâmetro ?room= está na URL (integração iLibras)
           const autoRoom = new URLSearchParams(window.location.search).get('room');
-          if (autoRoom) {
+          // O WebSocket reconecta sozinho a cada 3s; sem esta guarda o
+          // auto-join devolveria o surdo à sala que o intérprete encerrou.
+          if (autoRoom && !salaEncerrada) {
             roomIdInput.value = autoRoom;
             joinRoom();
           }
@@ -359,6 +369,13 @@ function connectWebSocket() {
           if (data.rotulo) peerRotulos.set(data.peerId, data.rotulo);
           showStatus(`Novo participante entrando...`, 'info');
           adicionarEventoChat((data.rotulo || 'Participante') + ' entrou na chamada');
+          break;
+
+        // Quem conduz o atendimento encerrou: a sala acabou para todos.
+        case 'room-closed':
+          salaEncerrada = true;
+          mostrarTelaEncerrada('O atendimento foi encerrado pelo intérprete.');
+          hangup('sala_encerrada');
           break;
 
         case 'peer-left':
@@ -791,6 +808,17 @@ function stopRecording() {
     mediaRecorder.stop();
     recordBtn.classList.remove('recording');
     recordBtn.textContent = '⏺️';
+    return;
+  }
+
+  // Encerrar antes de o MediaRecorder existir (ele nasce meio segundo depois
+  // do startRecording) deixava o hangup esperando para sempre por um upload
+  // que nunca viria — e, com o botão de encerrar agora no iLibras, isso
+  // travaria o intérprete na tela do atendimento.
+  isRecording = false;
+  if (recordingUploadResolve) {
+    recordingUploadResolve(null);
+    recordingUploadResolve = null;
   }
 }
 
@@ -853,6 +881,19 @@ async function uploadRecording(blob) {
   }
 }
 
+// Ordens da página que embute o GoCall. O botão de encerrar saiu daqui e
+// virou "Encerrar Atendimento" no iLibras_v2: é de lá que o pedido chega,
+// e é por isso que a gravação passa a ser finalizada em todo encerramento.
+// Só aceita do próprio pai — qualquer outra janela é ignorada.
+window.addEventListener('message', (evento) => {
+  if (!isEmbedMode || window.parent === window) return;
+  if (evento.source !== window.parent) return;
+  if (!evento.data || evento.data.type !== 'ilibras-encerrar-chamada') return;
+
+  salaEncerrada = true;
+  hangup('encerrado_pelo_interprete', { encerrarSala: true });
+});
+
 window.addEventListener('beforeunload', (e) => {
   if (!isUploadingRecording) return;
   e.preventDefault();
@@ -871,7 +912,17 @@ if (isEmbedMode) {
   if (recordBtn) recordBtn.style.display = 'none';
 }
 
-async function hangup(motivo = 'manual') {
+async function hangup(motivo = 'manual', { encerrarSala = false } = {}) {
+  if (encerrando) return;
+  encerrando = true;
+
+  // Derruba a sala ANTES de esperar a gravação. O upload é do intérprete e
+  // pode levar minutos; o surdo e o suporte não podem seguir numa chamada
+  // que já foi encerrada só porque o vídeo ainda está subindo.
+  if (encerrarSala && ws && ws.readyState === WebSocket.OPEN && currentRoom) {
+    sendMessage({ type: 'end-call' });
+  }
+
   let recordingResult = null;
 
   if (isRecording) {
@@ -929,11 +980,27 @@ async function hangup(motivo = 'manual') {
       recording_url: recordingResult ? recordingResult.url : null,
       recording_key: recordingResult ? recordingResult.key : null
     }, '*');
+    encerrando = false;
     return;
   }
 
-  lobbyEl.classList.remove('hidden');
-  showLobbyStatus('Você saiu da sala', 'info');
+  if (salaEncerrada) {
+    mostrarTelaEncerrada();
+  } else {
+    lobbyEl.classList.remove('hidden');
+    showLobbyStatus('Você saiu da sala', 'info');
+  }
+  encerrando = false;
+}
+
+function mostrarTelaEncerrada(texto) {
+  // Em modo embed quem dá a notícia é a página do iLibras: ela troca o iframe
+  // pelo pedido de feedback (intérprete) ou devolve para a fila (suporte).
+  if (isEmbedMode) return;
+  if (texto && encerradaTexto) encerradaTexto.textContent = texto;
+  roomEl.classList.add('hidden');
+  lobbyEl.classList.add('hidden');
+  if (encerradaEl) encerradaEl.classList.remove('hidden');
 }
 
 function showStatus(message, type) {
@@ -964,9 +1031,6 @@ roomIdInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !joinBtn
 muteBtn.addEventListener('click', toggleAudio);
 videoBtn.addEventListener('click', toggleVideo);
 recordBtn.addEventListener('click', toggleRecording);
-// Envolvido numa arrow de propósito: passar hangup direto faria o objeto de
-// evento do clique chegar como motivo.
-hangupBtn.addEventListener('click', () => hangup('manual'));
 chatBtn.addEventListener('click', alternarChat);
 chatFecharBtn.addEventListener('click', fecharChat);
 chatForm.addEventListener('submit', enviarMensagemChat);

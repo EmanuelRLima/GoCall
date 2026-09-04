@@ -12,7 +12,10 @@ body {
 }
 
 /* ── LOBBY ─────────────────────────────────────── */
-#lobby {
+/* #encerrada usa o mesmo fundo do lobby: é a tela que ocupa o lugar dele
+   quando a sala é encerrada pelo intérprete. */
+#lobby,
+#encerrada {
   min-height: 100vh;
   display: flex;
   justify-content: center;

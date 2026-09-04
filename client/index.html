@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WebRTC — Sala de Vídeo</title>
-  <link rel="stylesheet" href="style.css?v=9">
+  <link rel="stylesheet" href="style.css?v=10">
 </head>
 <body>
   <!-- Tela de entrada -->
@@ -52,12 +52,21 @@
         <button id="videoBtn" class="ctrl-btn" title="Câmera">📹</button>
         <button id="chatBtn" class="ctrl-btn" title="Chat" aria-label="Abrir chat">💬<span id="chatBadge" class="chat-badge hidden">0</span></button>
         <button id="recordBtn" class="ctrl-btn" title="Gravar">⏺️</button>
-        <button id="hangupBtn" class="ctrl-btn danger" title="Sair">📞</button>
       </div>
       <div id="status"></div>
     </div>
   </div>
 
-  <script src="app.js?v=9"></script>
+  <!-- Fim de chamada. Ocupa o lugar do lobby quando a sala é encerrada pelo
+       intérprete: quem chega aqui é o surdo, e devolver o formulário de entrada
+       só o convidaria a voltar para uma sala que não existe mais. -->
+  <div id="encerrada" class="hidden">
+    <div class="lobby-card">
+      <h1>Chamada encerrada</h1>
+      <p class="lobby-subtitle" id="encerradaTexto">O intérprete encerrou o atendimento.</p>
+    </div>
+  </div>
+
+  <script src="app.js?v=10"></script>
 </body>
 </html>
