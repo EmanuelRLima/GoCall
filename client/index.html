@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WebRTC — Sala de Vídeo</title>
-  <link rel="stylesheet" href="style.css?v=10">
+  <link rel="stylesheet" href="style.css?v=11">
 </head>
 <body>
   <!-- Tela de entrada -->
@@ -13,11 +13,14 @@
       <h1>WebRTC — Sala de Vídeo</h1>
       <p class="lobby-subtitle">Até 5 participantes por sala</p>
       <div class="lobby-form">
+        <label for="roomId" class="sr-only">ID da sala</label>
         <input type="text" id="roomId" placeholder="ID da sala (ex: sala123)" autocomplete="off">
-        <button id="joinBtn">Entrar na Sala</button>
+        <button type="button" id="joinBtn">Entrar na Sala</button>
       </div>
       <p class="lobby-id">Seu ID: <strong id="myId">Conectando...</strong></p>
-      <div id="lobbyStatus"></div>
+      <!-- Mensagens de conexão e de falha de câmera aparecem aqui: precisa ser
+           região viva, senão só quem enxerga fica sabendo. -->
+      <div id="lobbyStatus" role="status" aria-live="polite"></div>
     </div>
   </div>
 
@@ -28,7 +31,7 @@
            grid: com o chat aberto o espaço do vídeo muda, e é esse espaço, não
            o da janela, que decide se os quadros ficam lado a lado ou empilhados. -->
       <div id="areaVideo">
-        <div id="videosGrid"></div>
+        <div id="videosGrid" role="group" aria-label="Participantes da chamada"></div>
       </div>
 
       <aside id="chat" class="hidden" aria-label="Chat da chamada">
@@ -47,26 +50,40 @@
 
     <div class="room-bar">
       <span id="roomLabel" class="room-name"></span>
-      <div class="room-controls">
-        <button id="muteBtn" class="ctrl-btn" title="Microfone">🎤</button>
-        <button id="videoBtn" class="ctrl-btn" title="Câmera">📹</button>
-        <button id="chatBtn" class="ctrl-btn" title="Chat" aria-label="Abrir chat">💬<span id="chatBadge" class="chat-badge hidden">0</span></button>
-        <button id="recordBtn" class="ctrl-btn" title="Gravar">⏺️</button>
+      <div class="room-controls" role="group" aria-label="Controles da chamada">
+        <button type="button" id="muteBtn" class="ctrl-btn" title="Microfone"
+                aria-label="Desligar o microfone" aria-pressed="false">
+          <span aria-hidden="true">🎤</span>
+        </button>
+        <button type="button" id="videoBtn" class="ctrl-btn" title="Câmera"
+                aria-label="Desligar a câmera" aria-pressed="false">
+          <span aria-hidden="true">📹</span>
+        </button>
+        <button type="button" id="chatBtn" class="ctrl-btn" title="Chat"
+                aria-label="Abrir chat" aria-expanded="false" aria-controls="chat">
+          <span aria-hidden="true">💬</span><span id="chatBadge" class="chat-badge hidden">0</span>
+        </button>
+        <button type="button" id="recordBtn" class="ctrl-btn" title="Gravar"
+                aria-label="Iniciar gravação" aria-pressed="false">
+          <span aria-hidden="true">⏺️</span>
+        </button>
       </div>
-      <div id="status"></div>
+      <!-- Estado da chamada: "gravando", "participante saiu", "enviando
+           gravação". Sem região viva, só chega a quem está olhando. -->
+      <div id="status" role="status" aria-live="polite"></div>
     </div>
   </div>
 
   <!-- Fim de chamada. Ocupa o lugar do lobby quando a sala é encerrada pelo
        intérprete: quem chega aqui é o surdo, e devolver o formulário de entrada
        só o convidaria a voltar para uma sala que não existe mais. -->
-  <div id="encerrada" class="hidden">
+  <div id="encerrada" class="hidden" role="status" aria-live="polite">
     <div class="lobby-card">
       <h1>Chamada encerrada</h1>
       <p class="lobby-subtitle" id="encerradaTexto">O intérprete encerrou o atendimento.</p>
     </div>
   </div>
 
-  <script src="app.js?v=10"></script>
+  <script src="app.js?v=11"></script>
 </body>
 </html>

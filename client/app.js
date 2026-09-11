@@ -159,9 +159,28 @@ function rotuloDoPapel(papel) {
   return mapa[String(papel || '').toLowerCase()] || '';
 }
 
+/**
+ * Atualiza um botão que alterna entre dois estados. O ícone é decorativo (fica
+ * num <span aria-hidden>); quem carrega o significado é o aria-label, que diz a
+ * PRÓXIMA ação, e o aria-pressed, que diz o estado ATUAL.
+ *
+ * Antes, o textContent era trocado direto — o que apagava o span e deixava o
+ * rótulo congelado no estado inicial.
+ */
+function atualizarBotaoAlternavel(botao, { icone, rotulo, ativo }) {
+  const span = botao.querySelector('span[aria-hidden="true"]');
+  if (span) span.textContent = icone;
+  else botao.textContent = icone;
+
+  botao.setAttribute('aria-label', rotulo);
+  botao.setAttribute('aria-pressed', ativo ? 'true' : 'false');
+}
+
 function abrirChat() {
   chatAberto = true;
   chatEl.classList.remove('hidden');
+  chatBtn.setAttribute('aria-expanded', 'true');
+  chatBtn.setAttribute('aria-label', 'Fechar chat');
   chatNaoLidas = 0;
   atualizarBadge();
   chatMensagens.scrollTop = chatMensagens.scrollHeight;
@@ -170,6 +189,8 @@ function abrirChat() {
 function fecharChat() {
   chatAberto = false;
   chatEl.classList.add('hidden');
+  chatBtn.setAttribute('aria-expanded', 'false');
+  chatBtn.setAttribute('aria-label', 'Abrir chat');
 }
 
 function alternarChat() {
@@ -278,6 +299,9 @@ function createTile(id, label, stream, isLocal) {
   avatar.textContent = '👤';
 
   const video = document.createElement('video');
+  // O quadro é de alguém: sem rótulo, o leitor de tela anuncia só "vídeo".
+  video.setAttribute('aria-label', 'Vídeo de ' + label);
+  video.setAttribute('title', label);
   video.autoplay = true;
   video.playsinline = true;
   video.setAttribute('playsinline', '');
@@ -439,9 +463,9 @@ function connectWebSocket() {
       isAudioMuted = false;
       isVideoMuted = false;
       muteBtn.classList.remove('off');
-      muteBtn.textContent = '🎤';
+      atualizarBotaoAlternavel(muteBtn, { icone: '🎤', rotulo: 'Desligar o microfone', ativo: false });
       videoBtn.classList.remove('off');
-      videoBtn.textContent = '📹';
+      atualizarBotaoAlternavel(videoBtn, { icone: '📹', rotulo: 'Desligar a câmera', ativo: false });
       roomEl.classList.add('hidden');
       lobbyEl.classList.remove('hidden');
     }
@@ -626,7 +650,12 @@ function toggleAudio() {
   isAudioMuted = !isAudioMuted;
   localStream.getAudioTracks()[0].enabled = !isAudioMuted;
   muteBtn.classList.toggle('off', isAudioMuted);
-  muteBtn.textContent = isAudioMuted ? '🔇' : '🎤';
+  atualizarBotaoAlternavel(muteBtn, {
+    icone: isAudioMuted ? '🔇' : '🎤',
+    rotulo: isAudioMuted ? 'Ligar o microfone' : 'Desligar o microfone',
+    ativo: isAudioMuted,
+  });
+  showStatus(isAudioMuted ? 'Microfone desligado' : 'Microfone ligado', 'info');
 }
 
 function toggleVideo() {
@@ -634,7 +663,14 @@ function toggleVideo() {
   isVideoMuted = !isVideoMuted;
   localStream.getVideoTracks()[0].enabled = !isVideoMuted;
   videoBtn.classList.toggle('off', isVideoMuted);
-  videoBtn.textContent = isVideoMuted ? '🚫' : '📹';
+  atualizarBotaoAlternavel(videoBtn, {
+    icone: isVideoMuted ? '🚫' : '📹',
+    rotulo: isVideoMuted ? 'Ligar a câmera' : 'Desligar a câmera',
+    ativo: isVideoMuted,
+  });
+  // Para quem se comunica em sinais, desligar a câmera encerra a conversa —
+  // o aviso precisa ser explícito.
+  showStatus(isVideoMuted ? 'Câmera desligada — o intérprete não vê seus sinais' : 'Câmera ligada', 'info');
 }
 
 function toggleRecording() {
@@ -791,7 +827,7 @@ async function startRecording() {
     sendMessage({ type: 'recording-started', recorderId: myId });
     
     recordBtn.classList.add('recording');
-    recordBtn.textContent = '⏹️';
+    atualizarBotaoAlternavel(recordBtn, { icone: '⏹️', rotulo: 'Parar a gravação', ativo: true });
     showStatus('Gravando todos os participantes...', 'success');
   } catch (error) {
     
@@ -807,7 +843,7 @@ function stopRecording() {
     isRecording = false;
     mediaRecorder.stop();
     recordBtn.classList.remove('recording');
-    recordBtn.textContent = '⏺️';
+    atualizarBotaoAlternavel(recordBtn, { icone: '⏺️', rotulo: 'Iniciar gravação', ativo: false });
     return;
   }
 
@@ -949,14 +985,14 @@ async function hangup(motivo = 'manual', { encerrarSala = false } = {}) {
   recordBtn.disabled = false;
   recordBtn.style.opacity = '1';
   recordBtn.classList.remove('recording');
-  recordBtn.textContent = '⏺️';
+  atualizarBotaoAlternavel(recordBtn, { icone: '⏺️', rotulo: 'Iniciar gravação', ativo: false });
 
   isAudioMuted = false;
   isVideoMuted = false;
   muteBtn.classList.remove('off');
-  muteBtn.textContent = '🎤';
+  atualizarBotaoAlternavel(muteBtn, { icone: '🎤', rotulo: 'Desligar o microfone', ativo: false });
   videoBtn.classList.remove('off');
-  videoBtn.textContent = '📹';
+  atualizarBotaoAlternavel(videoBtn, { icone: '📹', rotulo: 'Desligar a câmera', ativo: false });
 
   for (const [, pc] of peerConnections) pc.close();
   peerConnections.clear();
