@@ -81,6 +81,10 @@ let avisouSozinho = false;
 // o feedback de um atendimento que ainda não tinha acabado.
 const ESPERA_PELA_VOLTA_MS = 30000;
 const MAX_TENTATIVAS_ICE = 6;
+// Ao fechar o navegador a câmera e o microfone terminam antes da página.
+// Esperar um pouco antes de acusar deixa esse caso morrer junto com ela.
+const ESPERA_ANTES_DE_ACUSAR_TRILHA_MS = 2000;
+let paginaSaindo = false;
 
 const parametros = new URLSearchParams(window.location.search);
 const isEmbedMode = parametros.get('mode') === 'embed';
@@ -772,11 +776,13 @@ function vigiarTrilhasLocais(stream) {
     const ehVideo = track.kind === 'video';
 
     track.addEventListener('ended', () => {
-      if (!localStream || !localStream.getTracks().includes(track)) return;
-      registrarEvento(ehVideo ? 'camera_parou' : 'microfone_parou', 'erro', { rotulo: track.label });
-      showStatus(ehVideo
-        ? 'Sua câmera parou de funcionar. Verifique se ela foi desconectada ou se outro programa a está usando.'
-        : 'Seu microfone parou de funcionar. Verifique se ele foi desconectado.', 'error');
+      setTimeout(() => {
+        if (paginaSaindo || !localStream || !localStream.getTracks().includes(track)) return;
+        registrarEvento(ehVideo ? 'camera_parou' : 'microfone_parou', 'erro', { rotulo: track.label });
+        showStatus(ehVideo
+          ? 'Sua câmera parou de funcionar. Verifique se ela foi desconectada ou se outro programa a está usando.'
+          : 'Seu microfone parou de funcionar. Verifique se ele foi desconectado.', 'error');
+      }, ESPERA_ANTES_DE_ACUSAR_TRILHA_MS);
     });
 
     // "mute" aqui não é o botão de silenciar: é o sistema deixando de entregar
@@ -1701,6 +1707,8 @@ window.addEventListener('message', (evento) => {
   salaEncerrada = true;
   hangup('encerrado_pelo_interprete', { encerrarSala: true });
 });
+
+window.addEventListener('pagehide', () => { paginaSaindo = true; });
 
 window.addEventListener('beforeunload', (e) => {
   if (!isUploadingRecording) return;
