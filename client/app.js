@@ -842,7 +842,7 @@ function createPeerConnection(peerId, ofertante) {
     checagensSemQuadro: 0,
     videoParado: false,
     videoParadoDesde: null,
-    errosTurn: 0
+    errosTurn: []
   };
   info.pendentes.forEach(c => contarCandidato(info.candidatosRemotos, c));
   candidatosAntecipados.delete(peerId);
@@ -877,14 +877,15 @@ function createPeerConnection(peerId, ofertante) {
     sendMessage({ type: 'ice-candidate', candidate: event.candidate, target: peerId });
   };
 
-  // Só interessa erro do TURN — STUN em IPv6 sem rota falha o tempo todo e
-  // não quer dizer nada. Um por conexão basta para saber que o TURN não
-  // respondeu (credencial vencida, porta bloqueada).
+  // Erro de TURN sozinho não quer dizer nada: em máquina com IPv6 sem rota,
+  // o Chrome reporta 701 em toda chamada mesmo com o relay funcionando pelo
+  // IPv4. E faltar candidato relay também não: quando os dois lados se acham
+  // na rede local, o Chrome encerra a coleta antes de o TURN responder. Os
+  // erros só são guardados, para ir junto quando a conexão não fechar.
   pc.onicecandidateerror = (event) => {
-    if (!/^turns?:/.test(event.url || '') || info.errosTurn++ > 0) return;
-    registrarEvento('turn_falhou', 'aviso', {
-      url: event.url, codigo: event.errorCode, texto: String(event.errorText || '').slice(0, 200)
-    });
+    if (!/^turns?:/.test(event.url || '') || info.errosTurn.length >= 5) return;
+    const erro = `${event.errorCode} ${String(event.errorText || '').slice(0, 80)} (${event.url})`;
+    if (!info.errosTurn.includes(erro)) info.errosTurn.push(erro);
   };
 
   pc.onconnectionstatechange = () => tratarEstadoDaConexao(peerId, pc);
@@ -911,8 +912,14 @@ function conexaoDemorou(peerId, pc) {
     candidatos_locais: info.candidatosLocais,
     candidatos_remotos: info.candidatosRemotos,
     turn: turnDisponivel,
+    erros_turn: info.errosTurn,
     segundos: Math.round((Date.now() - info.criadoEm) / 1000)
   });
+  // Não conectou e este lado nem conseguiu endereço no TURN: o servidor de
+  // retransmissão não respondeu (porta bloqueada na rede, credencial vencida).
+  if (turnDisponivel && !info.candidatosLocais.relay) {
+    registrarEvento('turn_falhou', 'aviso', { erros: info.errosTurn, coleta: pc.iceGatheringState });
+  }
   if (!definirAviso(peerId, 'conexao', 'Não foi possível conectar o vídeo. Tentando de novo...')) {
     showStatus(`Não foi possível conectar com ${rotuloDe(peerId)}. Tentando de novo...`, 'error');
   }
@@ -988,7 +995,8 @@ async function reiniciarIce(peerId, motivo) {
         ice: pc.iceConnectionState,
         candidatos_locais: info.candidatosLocais,
         candidatos_remotos: info.candidatosRemotos,
-        turn: turnDisponivel
+        turn: turnDisponivel,
+        erros_turn: info.errosTurn
       });
       if (!definirAviso(peerId, 'conexao', `Não foi possível conectar com ${rotuloDe(peerId)}. Peça para a pessoa recarregar a página.`)) {
         showStatus(`Não foi possível conectar com ${rotuloDe(peerId)}.`, 'error');
