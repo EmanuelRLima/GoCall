@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Teste de equipamento — iLibras</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="diagnostico.css?v=1">
+</head>
+<body>
+  <main class="teste">
+    <header class="teste-topo" id="topo">
+      <h1>Teste de câmera, microfone e conexão</h1>
+      <p>Leva menos de um minuto. Faça antes de começar a atender, e sempre que a chamada der problema.</p>
+    </header>
+
+    <div class="teste-corpo">
+      <section class="painel painel-camera" aria-labelledby="titulo-camera">
+        <h2 id="titulo-camera" class="sr-only">Sua câmera</h2>
+        <div class="previa">
+          <video id="previa" autoplay playsinline muted aria-label="Imagem da sua câmera"></video>
+          <p id="previaVazia" class="previa-vazia">A imagem da sua câmera aparece aqui.</p>
+          <span id="previaRotulo" class="previa-rotulo hidden">Ao vivo</span>
+        </div>
+
+        <div class="medidor" aria-hidden="true">
+          <span class="medidor-icone">🎤</span>
+          <div class="medidor-trilho"><div id="medidorNivel" class="medidor-nivel"></div></div>
+        </div>
+
+        <div id="seletores" class="seletores hidden">
+          <label>
+            <span>Câmera</span>
+            <select id="seletorCamera"></select>
+          </label>
+          <label>
+            <span>Microfone</span>
+            <select id="seletorMicrofone"></select>
+          </label>
+          <p class="seletores-dica">A escolha vale para as próximas chamadas neste navegador.</p>
+        </div>
+
+        <!-- Trecho gravado no teste, para a pessoa ver com os próprios olhos
+             o que fica registrado. -->
+        <div id="reproducao" class="reproducao hidden">
+          <p class="reproducao-titulo">Trecho gravado no teste</p>
+          <video id="videoGravado" controls playsinline aria-label="Trecho gravado no teste"></video>
+        </div>
+      </section>
+
+      <section class="painel painel-etapas" aria-labelledby="titulo-etapas">
+        <h2 id="titulo-etapas" class="sr-only">Etapas do teste</h2>
+        <ol id="etapas" class="etapas"></ol>
+
+        <!-- Pergunta do som e contagem da gravação: o teste para aqui e
+             espera a pessoa. -->
+        <div id="interacao" class="interacao hidden" role="group" aria-labelledby="interacaoTexto">
+          <p id="interacaoTexto"></p>
+          <div id="interacaoBotoes" class="interacao-botoes"></div>
+        </div>
+
+        <div id="resumo" class="resumo hidden" role="status" aria-live="polite">
+          <p id="resumoTitulo" class="resumo-titulo"></p>
+          <p id="resumoTexto" class="resumo-texto"></p>
+        </div>
+
+        <div class="acoes">
+          <button type="button" id="iniciarBtn" class="botao botao-primario">Iniciar teste</button>
+        </div>
+
+        <p id="anuncio" class="sr-only" role="status" aria-live="polite"></p>
+      </section>
+    </div>
+  </main>
+
+  <script src="comum.js?v=12"></script>
+  <script src="diagnostico.js?v=1"></script>
+</body>
+</html>

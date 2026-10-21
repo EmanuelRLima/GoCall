@@ -98,9 +98,11 @@ Formato: `{PASTA_CONFIGURADA}/{ID_DA_SALA}_{TIMESTAMP}.webm`
 ## 🔧 Características técnicas
 
 ### Gravação
-- **Formato**: WebM (VP9 + Opus)
-- **Conteúdo**: Vídeo local + áudio mixado de todos os participantes
+- **Formato**: o primeiro que o navegador aceitar entre MP4 (H.264) e WebM (VP9/VP8); o servidor converte o áudio para AAC e entrega MP4
+- **Conteúdo**: grade com o vídeo de todos os participantes + áudio mixado de todos (inclusive de quem entra depois do início)
+- **Ritmo dos quadros**: relógio num Web Worker (`client/comum.js`). O `requestAnimationFrame` usado antes parava com a aba escondida, e a gravação saía com a imagem congelada e só o áudio andando
 - **Chunks**: Dados capturados a cada 1 segundo para evitar perda de dados
+- **Conferência**: depois de transcodificar, o servidor lê o arquivo com o ffprobe e manda ao iLibras o evento `gravacao_analisada` (ou `gravacao_com_problema`, com os quadros por segundo)
 
 ### Upload
 - Upload automático após parar a gravação
@@ -109,8 +111,8 @@ Formato: `{PASTA_CONFIGURADA}/{ID_DA_SALA}_{TIMESTAMP}.webm`
 
 ## ⚠️ Notas importantes
 
-1. **Tamanho máximo**: O servidor está configurado para aceitar arquivos de até 500MB
-2. **Codec**: Certifique-se de que seu navegador suporta WebM com VP9 (Chrome, Firefox, Edge modernos suportam)
+1. **Tamanho máximo**: `GRAVACAO_MAX_MB` (padrão 1500 MB, cerca de 1h20 a 2,5 Mbps). O `client_max_body_size` do nginx na frente precisa ser maior
+2. **Codec**: Chrome e Edge gravam MP4; Firefox grava WebM
 3. **Custos AWS**: Lembre-se que uploads e armazenamento no S3 têm custos associados
 4. **Segurança**: Nunca commite o arquivo `.env` com suas credenciais (já está no .gitignore)
 
@@ -129,6 +131,13 @@ Formato: `{PASTA_CONFIGURADA}/{ID_DA_SALA}_{TIMESTAMP}.webm`
 - Verifique a conexão com a internet
 - Confirme que o bucket S3 existe
 - Verifique os logs do servidor para detalhes
+
+## 🩺 Diagnóstico da chamada
+
+- **Eventos**: cliente e servidor registram o que acontece na chamada (entrou, vídeo conectou e por qual rota, conexão caiu, vídeo parou de chegar, gravação sem vídeo...). Cada evento vira uma linha `[evento] {...}` no log do supervisor e segue em lote para `ILIBRAS_WEBHOOK_URL/api/webhooks/gocall/eventos`, onde fica junto do atendimento e alerta pelo Nightwatch.
+- **Teste de equipamento**: `/diagnostico.html` testa câmera, microfone, som, conexão (incluindo o TURN) e grava 10 segundos pelo mesmo caminho da chamada; o servidor confere o arquivo em `/api/diagnostico/gravacao` sem guardar nada. Embutido no iLibras (`?mode=embed`), entrega o resultado à página de cima.
+- **TURN**: sem ele, quem está atrás de rede fechada não troca vídeo. Configure `TURN_URLS` + `TURN_SECRET` (coturn com `use-auth-secret`) ou `TURN_USERNAME`/`TURN_CREDENTIAL`. O servidor avisa na subida quando não há TURN.
+- **Testes**: `npm test` (credenciais TURN, análise da gravação com ffmpeg/ffprobe de verdade, envio de eventos).
 
 ## 📊 Monitoramento
 

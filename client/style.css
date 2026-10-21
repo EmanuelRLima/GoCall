@@ -262,6 +262,50 @@ body {
   display: none;
 }
 
+/* Por que o quadro está preto (conexão, câmera desligada, vídeo parado). No
+   alto do tile para não cobrir o centro, onde ficam as mãos de quem sinaliza. */
+.video-tile .tile-aviso {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100% - 20px);
+  background: rgba(0, 0, 0, 0.78);
+  color: #fff;
+  padding: 6px 14px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  text-align: center;
+  pointer-events: none;
+}
+
+.video-tile .tile-aviso.hidden {
+  display: none;
+}
+
+/* O navegador barrou o som: o vídeo segue mudo até alguém tocar aqui. */
+.video-tile .tile-som {
+  position: absolute;
+  bottom: 44px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #f59e0b;
+  color: #1a1a2e;
+  border: none;
+  border-radius: 999px;
+  padding: 10px 18px;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+}
+
+.video-tile .tile-som:focus-visible {
+  outline: 3px solid #fff;
+  outline-offset: 2px;
+}
+
 /* Barra inferior */
 .room-bar {
   display: flex;
