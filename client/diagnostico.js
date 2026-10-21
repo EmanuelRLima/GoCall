@@ -817,6 +817,10 @@ async function testarGravacao() {
     definirEtapa('gravacao', 'falha', 'A gravação chegou ao servidor sem vídeo (só com áudio, ou sem quadros). Use o Google Chrome ou o Microsoft Edge atualizados e teste de novo.', dados);
   } else if (!analise.ok) {
     definirEtapa('gravacao', 'atencao', 'O vídeo foi gravado, mas sem áudio. Confira o microfone.', dados);
+  } else if (analise.reempacotada) {
+    definirEtapa('gravacao', 'atencao', 'Gravou, mas este navegador está desatualizado e grava o vídeo com defeito. O servidor conserta, mas atualize o Google Chrome ou o Microsoft Edge.', dados);
+  } else if (analise.recodificada) {
+    definirEtapa('gravacao', 'atencao', 'Gravou, mas o servidor precisou converter o vídeo deste navegador. Use o Google Chrome ou o Microsoft Edge atualizados.', dados);
   } else if (analise.quadros_por_segundo !== null && analise.quadros_por_segundo < 10) {
     definirEtapa('gravacao', 'atencao', `Gravou, mas com poucos quadros por segundo (${analise.quadros_por_segundo}). Os sinais podem ficar travados na gravação. Feche outros programas pesados.`, dados);
   } else {

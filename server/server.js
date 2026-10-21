@@ -10,12 +10,9 @@ import { Upload } from '@aws-sdk/lib-storage';
 import { createReadStream, unlink } from 'fs';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
-import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
-import ffmpeg from 'fluent-ffmpeg';
 import { montarServidoresIce, temTurn } from './ice.js';
-import { analisarMidia, avaliarGravacao } from './midia.js';
+import { analisarMidia, avaliarGravacao, conferirDecodificacao, converterGravacao } from './midia.js';
 import { criarTelemetria, normalizarEventoDoCliente } from './telemetria.js';
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -513,20 +510,12 @@ async function processarGravacao(inputPath, outputPath, roomId, timestamp, estat
   });
 
   try {
-    // Transcodifica WebM (Opus) → MP4 (AAC) usando FFmpeg
-    await new Promise((resolve, reject) => {
-      ffmpeg(inputPath)
-        .outputOptions([
-          '-c:v copy',
-          '-c:a aac',
-          '-b:a 128k',
-          '-movflags +faststart'
-        ])
-        .output(outputPath)
-        .on('end', resolve)
-        .on('error', reject)
-        .run();
-    });
+    const conversao = await converterGravacao(inputPath, outputPath);
+    if (conversao.reempacotada || conversao.recodificada) {
+      // Gravou, mas o navegador entregou um vídeo que precisou de conserto.
+      // Quase sempre é navegador desatualizado: vale avisar quem gravou.
+      evento('gravacao_consertada', 'aviso', { ...conversao, cliente: estatisticas });
+    }
 
     // Confere o arquivo que vai virar o registro do atendimento. Antes, uma
     // gravação sem vídeo só era descoberta quando alguém abria o atendimento
@@ -534,12 +523,14 @@ async function processarGravacao(inputPath, outputPath, roomId, timestamp, estat
     // melhor que se tem.
     try {
       const analise = await analisarMidia(outputPath);
-      const avaliacao = avaliarGravacao(analise, duracaoInformadaS);
+      const decodificacao = await conferirDecodificacao(outputPath).catch(() => null);
+      const avaliacao = avaliarGravacao(analise, duracaoInformadaS, decodificacao);
       evento(avaliacao.ok ? 'gravacao_analisada' : 'gravacao_com_problema', avaliacao.ok ? 'info' : 'erro', {
         ...avaliacao,
         video: analise.video,
         audio: analise.audio,
         bytes: analise.bytes,
+        decodificacao,
         cliente: estatisticas,
       });
     } catch (erroAnalise) {
@@ -631,19 +622,28 @@ app.post('/api/diagnostico/gravacao', limitarDiagnostico, uploadDiagnostico.sing
   }
 
   const duracaoInformadaS = Number(req.body.duracao_ms) > 0 ? Number(req.body.duracao_ms) / 1000 : null;
+  // Passa pela mesma conversão da chamada: o que se confere é o arquivo que
+  // ficaria como registro, não o que o navegador mandou.
+  const convertido = path.join(tmpdir(), `${randomUUID()}.mp4`);
   try {
-    const analise = await analisarMidia(req.file.path);
+    const conversao = await converterGravacao(req.file.path, convertido);
+    const analise = await analisarMidia(convertido);
+    const decodificacao = await conferirDecodificacao(convertido).catch(() => null);
     res.json({
-      ...avaliarGravacao(analise, duracaoInformadaS),
+      ...avaliarGravacao(analise, duracaoInformadaS, decodificacao),
       video: analise.video,
       audio: analise.audio,
       bytes: analise.bytes,
       formato: analise.formato,
+      decodificacao,
+      reempacotada: conversao.reempacotada,
+      recodificada: conversao.recodificada,
     });
   } catch (erro) {
     res.status(422).json({ ok: false, problemas: ['arquivo_ilegivel'], erro: erro.message });
   } finally {
     unlink(req.file.path, () => {});
+    unlink(convertido, () => {});
   }
 });
 

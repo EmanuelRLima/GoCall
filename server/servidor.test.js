@@ -3,15 +3,22 @@ import assert from 'node:assert/strict';
 import { createHmac } from 'crypto';
 import { tmpdir } from 'os';
 import path from 'path';
-import { unlink } from 'fs/promises';
+import { readFile, unlink, writeFile } from 'fs/promises';
 import { randomUUID } from 'crypto';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+import ffprobeInstaller from '@ffprobe-installer/ffprobe';
 import ffmpeg from 'fluent-ffmpeg';
 import { montarServidoresIce, temTurn } from './ice.js';
-import { analisarMidia, avaliarGravacao, resumirSaidaDoFfprobe } from './midia.js';
+import {
+  analisarMidia, avaliarGravacao, comecaComCodigoDeInicio, conferirDecodificacao, converterGravacao,
+  h264ComCodigoDeInicio, resumirSaidaDoFfprobe
+} from './midia.js';
 import { criarTelemetria, normalizarEventoDoCliente } from './telemetria.js';
 
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
+const executar = promisify(execFile);
 
 // ── ICE ────────────────────────────────────────────────────────────────
 
@@ -122,6 +129,113 @@ test('ffprobe denuncia arquivo só com áudio', async () => {
     assert.deepEqual(avaliarGravacao(analise, 2).problemas, ['sem_faixa_de_video']);
   } finally {
     await unlink(arquivo).catch(() => {});
+  }
+});
+
+// ── Vídeo que tem quadros mas não abre ──────────────────────────────────
+
+test('erro de decodificação vira video_ilegivel; um ou dois são tolerados', () => {
+  const analise = { duracao: 20, video: { pacotes: 300 }, audio: { pacotes: 900 } };
+  assert.deepEqual(avaliarGravacao(analise, null, { quadros: 300, erros: 12 }).problemas, ['video_ilegivel']);
+  assert.equal(avaliarGravacao(analise, null, { quadros: 300, erros: 2 }).ok, true);
+  assert.equal(avaliarGravacao(analise, null, null).ok, true);
+});
+
+test('reconhece código de início no dump do primeiro pacote', () => {
+  assert.equal(comecaComCodigoDeInicio('\n00000000: 0000 0001 6742 c02a 8c8d 403c 0113 f2c0  ....gB.*..@<....\n'), true);
+  assert.equal(comecaComCodigoDeInicio('\n00000000: 0000 3bb1 65b8 0427 118a 0002 0331 c000  ..;.e..\'.....1..\n'), false);
+  // Prefixo de tamanho que por acaso começa com 000001 não é código de início.
+  assert.equal(comecaComCodigoDeInicio('00000000: 0000 012c 6588 8400  ...,e...'), false);
+  assert.equal(comecaComCodigoDeInicio(undefined), false);
+});
+
+// Reproduz o que o Chrome 126 grava: troca o prefixo de tamanho de cada NAL
+// pelo código de início, sem mexer em mais nada do MP4.
+async function trocarPrefixosPorCodigoDeInicio(entrada, saida) {
+  const { stdout } = await executar(ffprobeInstaller.path, [
+    '-v', 'quiet', '-select_streams', 'v:0', '-show_entries', 'packet=pos,size', '-of', 'json', entrada
+  ]);
+  const bytes = await readFile(entrada);
+  for (const pacote of JSON.parse(stdout).packets) {
+    let i = Number(pacote.pos);
+    const fim = i + Number(pacote.size);
+    while (i + 4 <= fim) {
+      const tamanho = bytes.readUInt32BE(i);
+      bytes.writeUInt32BE(1, i);
+      i += 4 + tamanho;
+    }
+  }
+  await writeFile(saida, bytes);
+}
+
+const H264_COM_OPUS = [
+  { fonte: 'testsrc=size=320x180:rate=30', opcoes: ['-f', 'lavfi'] },
+  { fonte: 'sine=frequency=440:sample_rate=48000', opcoes: ['-f', 'lavfi'] }
+];
+const OPCOES_H264_COM_OPUS = [
+  '-t', '3', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-profile:v', 'baseline', '-g', '30', '-x264-params', 'repeat-headers=1',
+  '-c:a', 'libopus', '-strict', '-2', '-f', 'mp4'
+];
+
+test('MP4 do Chrome 126 (H.264 com código de início) é consertado sem recodificar', async () => {
+  const bom = path.join(tmpdir(), `${randomUUID()}.mp4`);
+  const quebrado = path.join(tmpdir(), `${randomUUID()}.mp4`);
+  const saida = path.join(tmpdir(), `${randomUUID()}.mp4`);
+  try {
+    await gerar(H264_COM_OPUS, bom, OPCOES_H264_COM_OPUS);
+    await trocarPrefixosPorCodigoDeInicio(bom, quebrado);
+
+    // O defeito: os pacotes estão todos lá, mas o decodificador não lê.
+    const antes = await analisarMidia(quebrado);
+    assert.ok(antes.video.pacotes >= 85, `pacotes: ${antes.video.pacotes}`);
+    assert.equal(await h264ComCodigoDeInicio(quebrado), true);
+    const decodificacaoAntes = await conferirDecodificacao(quebrado);
+    assert.deepEqual(avaliarGravacao(antes, 3, decodificacaoAntes).problemas, ['video_ilegivel']);
+
+    const conversao = await converterGravacao(quebrado, saida);
+    assert.equal(conversao.reempacotada, true);
+    assert.equal(conversao.recodificada, false);
+
+    const depois = await analisarMidia(saida);
+    const decodificacaoDepois = await conferirDecodificacao(saida);
+    assert.equal(decodificacaoDepois.erros, 0);
+    assert.equal(decodificacaoDepois.quadros, antes.video.pacotes);
+    assert.equal(depois.video.codec, 'h264');
+    assert.equal(depois.audio.codec, 'aac');
+    assert.equal(avaliarGravacao(depois, 3, decodificacaoDepois).ok, true);
+    assert.equal(await h264ComCodigoDeInicio(saida), false);
+  } finally {
+    for (const arquivo of [bom, quebrado, saida, `${saida}.ts`]) await unlink(arquivo).catch(() => {});
+  }
+});
+
+test('MP4 saudável passa direto, sem conserto', async () => {
+  const bom = path.join(tmpdir(), `${randomUUID()}.mp4`);
+  const saida = path.join(tmpdir(), `${randomUUID()}.mp4`);
+  try {
+    await gerar(H264_COM_OPUS, bom, OPCOES_H264_COM_OPUS);
+    assert.equal(await h264ComCodigoDeInicio(bom), false);
+    assert.deepEqual(await converterGravacao(bom, saida), { reempacotada: false, recodificada: false });
+    assert.equal((await conferirDecodificacao(saida)).erros, 0);
+  } finally {
+    for (const arquivo of [bom, saida]) await unlink(arquivo).catch(() => {});
+  }
+});
+
+test('VP8 (que o MP4 não aceita) é recodificado em vez de perder a gravação', async () => {
+  const webm = path.join(tmpdir(), `${randomUUID()}.webm`);
+  const saida = path.join(tmpdir(), `${randomUUID()}.mp4`);
+  try {
+    await gerar(H264_COM_OPUS, webm, ['-t', '3', '-c:v', 'libvpx', '-b:v', '300k', '-c:a', 'libopus']);
+    const conversao = await converterGravacao(webm, saida);
+    assert.equal(conversao.recodificada, true);
+    const analise = await analisarMidia(saida);
+    const decodificacao = await conferirDecodificacao(saida);
+    assert.equal(analise.video.codec, 'h264');
+    assert.equal(decodificacao.erros, 0);
+    assert.ok(decodificacao.quadros >= 85 && decodificacao.quadros <= 95, `quadros: ${decodificacao.quadros}`);
+  } finally {
+    for (const arquivo of [webm, saida]) await unlink(arquivo).catch(() => {});
   }
 });
 
