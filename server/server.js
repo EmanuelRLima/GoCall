@@ -7,17 +7,29 @@ import dotenv from 'dotenv';
 import multer from 'multer';
 import { S3Client } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
-import { createReadStream, createWriteStream, unlink } from 'fs';
+import { createReadStream, unlink } from 'fs';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
 import ffmpeg from 'fluent-ffmpeg';
+import { montarServidoresIce, temTurn } from './ice.js';
+import { analisarMidia, avaliarGravacao } from './midia.js';
+import { criarTelemetria, normalizarEventoDoCliente } from './telemetria.js';
 ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 dotenv.config({ path: path.join(__dirname, '..', '.env') });
+
+const telemetria = criarTelemetria({
+  url: process.env.ILIBRAS_WEBHOOK_URL,
+  token: process.env.ILIBRAS_WEBHOOK_TOKEN,
+});
+
+if (!temTurn(montarServidoresIce())) {
+  console.warn('Sem TURN configurado (TURN_URLS): quem estiver atrás de NAT restrito não vai conseguir trocar vídeo.');
+}
 
 const app = express();
 const server = createServer(app);
@@ -61,10 +73,31 @@ const s3Client = new S3Client({
   }
 });
 
+// Em disco, não na memória: a 2,5 Mbps a chamada passa de 500 MB por volta
+// dos 25 minutos, e o arquivo inteiro num Buffer do Node era o teto. O nginx
+// na frente tem o próprio limite (client_max_body_size) — os dois precisam
+// andar juntos.
+const GRAVACAO_MAX_MB = Number(process.env.GRAVACAO_MAX_MB) > 0 ? Number(process.env.GRAVACAO_MAX_MB) : 1500;
+
 const upload = multer({
-  storage: multer.memoryStorage(),
+  storage: multer.diskStorage({
+    destination: tmpdir(),
+    filename: (req, file, cb) => cb(null, `${randomUUID()}.gravacao`)
+  }),
   limits: {
-    fileSize: 500 * 1024 * 1024
+    fileSize: GRAVACAO_MAX_MB * 1024 * 1024
+  }
+});
+
+// Teste de equipamento: 10 segundos não passam de alguns MB. O limite baixo
+// é o que impede a rota pública de virar depósito de arquivo.
+const uploadDiagnostico = multer({
+  storage: multer.diskStorage({
+    destination: tmpdir(),
+    filename: (req, file, cb) => cb(null, `${randomUUID()}.diagnostico`)
+  }),
+  limits: {
+    fileSize: 20 * 1024 * 1024
   }
 });
 
@@ -110,16 +143,52 @@ function podeMandarChat(clientId) {
   return true;
 }
 
+// Mesma lógica do chat, com teto próprio: uma chamada normal manda poucos
+// eventos por minuto, e um laço no navegador não pode inundar o iLibras.
+const TELEMETRIA_JANELA_MS = 60000;
+const TELEMETRIA_MAX_NA_JANELA = 60;
+const telemetriaHistorico = new Map();
+
+function quantosEventosAceitar(clientId, quantidade) {
+  const agora = Date.now();
+  const recentes = (telemetriaHistorico.get(clientId) || []).filter(t => agora - t < TELEMETRIA_JANELA_MS);
+  const aceitos = Math.max(0, Math.min(quantidade, TELEMETRIA_MAX_NA_JANELA - recentes.length));
+  for (let i = 0; i < aceitos; i++) recentes.push(agora);
+  telemetriaHistorico.set(clientId, recentes);
+  return aceitos;
+}
+
+// O papel cru ('interprete', 'surdo', 'suporte') e não o rótulo: é o que o
+// iLibras usa para saber de que lado da chamada veio o problema.
+const clientPapel = new Map();
+
+function eventoDoServidor(clientId, tipo, nivel, dados = {}, sala = null) {
+  telemetria.registrar({
+    sala: sala || clientRoom.get(clientId) || null,
+    origem: 'servidor',
+    papel: clientPapel.get(clientId) || null,
+    cliente: clientId,
+    tipo,
+    nivel,
+    dados,
+    em: Date.now(),
+  });
+}
+
 wss.on('connection', (ws) => {
   const clientId = generateId();
   clients.set(clientId, ws);
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
 
-
+  // A lista vai junto com o id: o cliente entra na sala logo em seguida e
+  // precisa dela antes de abrir a primeira RTCPeerConnection.
+  const iceServers = montarServidoresIce();
   ws.send(JSON.stringify({
     type: 'init',
-    id: clientId
+    id: clientId,
+    iceServers,
+    turn: temTurn(iceServers)
   }));
 
   ws.on('message', (message) => {
@@ -151,6 +220,7 @@ wss.on('connection', (ws) => {
 
           if (room.size >= MAX_ROOM_SIZE) {
             ws.send(JSON.stringify({ type: 'room-full', room: roomId }));
+            eventoDoServidor(clientId, 'sala_lotada', 'aviso', { participantes: room.size }, roomId);
             return;
           }
 
@@ -158,6 +228,12 @@ wss.on('connection', (ws) => {
           room.add(clientId);
           clientRoom.set(clientId, roomId);
           clientRotulo.set(clientId, rotuloDe(data.papel));
+          clientPapel.set(clientId, String(data.papel || '').toLowerCase().slice(0, 30) || null);
+
+          eventoDoServidor(clientId, 'entrou_na_sala', 'info', {
+            participantes: room.size,
+            ja_estavam: existingMembers.map(id => clientPapel.get(id) || 'participante'),
+          });
 
           // peers continua sendo a lista de ids; os rótulos vão à parte para
           // não quebrar quem já consome esse formato.
@@ -205,6 +281,8 @@ wss.on('connection', (ws) => {
           const salaId = clientRoom.get(clientId);
           if (!salaId || !rooms.has(salaId)) break;
 
+          eventoDoServidor(clientId, 'sala_encerrada', 'info', { participantes: rooms.get(salaId).size });
+
           for (const peerId of rooms.get(salaId)) {
             if (peerId === clientId) continue;
             const peerWs = clients.get(peerId);
@@ -222,6 +300,7 @@ wss.on('connection', (ws) => {
         case 'leave-room': {
           const leaveRoomId = clientRoom.get(clientId);
           if (leaveRoomId && rooms.has(leaveRoomId)) {
+            eventoDoServidor(clientId, 'saiu_da_sala', 'info', { motivo: 'saida' });
             const room = rooms.get(leaveRoomId);
             room.delete(clientId);
             for (const peerId of room) {
@@ -261,6 +340,50 @@ wss.on('connection', (ws) => {
           break;
         }
 
+        // O ping do protocolo (ws.ping) não chega ao JavaScript do navegador:
+        // sem este eco o cliente não sabe que a conexão morreu e pode passar
+        // minutos achando que está na sala.
+        case 'ping': {
+          ws.send(JSON.stringify({ type: 'pong', t: data.t }));
+          break;
+        }
+
+        case 'telemetria': {
+          const brutos = Array.isArray(data.eventos) ? data.eventos.slice(0, 20) : [];
+          const aceitos = quantosEventosAceitar(clientId, brutos.length);
+          // Antes de entrar na sala (câmera recusada, por exemplo) o servidor
+          // ainda não sabe a sala; aí vale a que a página leu da própria URL.
+          const sala = clientRoom.get(clientId) || (typeof data.sala === 'string' ? data.sala : null);
+          const papel = clientPapel.get(clientId) || (typeof data.papel === 'string' ? data.papel.toLowerCase() : null);
+
+          for (const bruto of brutos.slice(0, aceitos)) {
+            const evento = normalizarEventoDoCliente(bruto);
+            if (!evento) continue;
+            telemetria.registrar({ ...evento, sala, papel, cliente: clientId, origem: 'cliente' });
+          }
+          break;
+        }
+
+        // Câmera/microfone ligados ou não, anunciados por quem os desligou. É
+        // o que deixa o outro lado dizer "desligou a câmera" em vez de mostrar
+        // um quadro preto sem explicação.
+        case 'estado-midia': {
+          const roomId = clientRoom.get(clientId);
+          if (!roomId || !rooms.has(roomId)) break;
+          const aviso = JSON.stringify({
+            type: 'estado-midia',
+            from: clientId,
+            camera: data.camera !== false,
+            microfone: data.microfone !== false
+          });
+          for (const peerId of rooms.get(roomId)) {
+            if (peerId === clientId) continue;
+            const peerWs = clients.get(peerId);
+            if (peerWs) peerWs.send(aviso);
+          }
+          break;
+        }
+
         case 'recording-started':
         case 'recording-stopped': {
           const roomId = clientRoom.get(clientId);
@@ -294,10 +417,14 @@ wss.on('connection', (ws) => {
     }
   });
 
-  ws.on('close', () => {
+  ws.on('close', (codigo) => {
     const roomId = clientRoom.get(clientId);
 
     if (roomId && rooms.has(roomId)) {
+      // Sair pelo fechamento da conexão (aba fechada, rede caída, heartbeat
+      // vencido) é diferente de sair pelo leave-room — e é o caso que explica
+      // "a outra pessoa sumiu".
+      eventoDoServidor(clientId, 'saiu_da_sala', 'aviso', { motivo: 'conexao_fechada', codigo });
       const room = rooms.get(roomId);
       room.delete(clientId);
 
@@ -319,7 +446,9 @@ wss.on('connection', (ws) => {
 
     clientRoom.delete(clientId);
     clientRotulo.delete(clientId);
+    clientPapel.delete(clientId);
     chatHistorico.delete(clientId);
+    telemetriaHistorico.delete(clientId);
     clients.delete(clientId);
   });
 });
@@ -363,8 +492,26 @@ async function notificarWebhook(payload) {
   }
 }
 
+// O navegador manda junto o que viu enquanto gravava (quadros desenhados,
+// tempo com a aba escondida, formato escolhido). É texto de qualquer um, então
+// só entra se for objeto e cabe no limite do evento.
+function lerEstatisticasDoCliente(texto) {
+  try {
+    const valor = JSON.parse(String(texto || '{}'));
+    if (!valor || typeof valor !== 'object' || Array.isArray(valor)) return {};
+    return JSON.stringify(valor).length > 3000 ? { truncado: true } : valor;
+  } catch (e) {
+    return {};
+  }
+}
+
 // Transcodifica e envia ao S3 em background — não bloqueia a resposta ao navegador.
-async function processarGravacao(inputPath, outputPath, roomId, timestamp) {
+async function processarGravacao(inputPath, outputPath, roomId, timestamp, estatisticas = {}, papel = null) {
+  const duracaoInformadaS = Number(estatisticas.duracao_ms) > 0 ? Number(estatisticas.duracao_ms) / 1000 : null;
+  const evento = (tipo, nivel, dados) => telemetria.registrar({
+    sala: roomId, origem: 'servidor', papel, tipo, nivel, dados, em: Date.now()
+  });
+
   try {
     // Transcodifica WebM (Opus) → MP4 (AAC) usando FFmpeg
     await new Promise((resolve, reject) => {
@@ -380,6 +527,24 @@ async function processarGravacao(inputPath, outputPath, roomId, timestamp) {
         .on('error', reject)
         .run();
     });
+
+    // Confere o arquivo que vai virar o registro do atendimento. Antes, uma
+    // gravação sem vídeo só era descoberta quando alguém abria o atendimento
+    // dias depois. A análise falhar não impede o envio: o arquivo ainda é o
+    // melhor que se tem.
+    try {
+      const analise = await analisarMidia(outputPath);
+      const avaliacao = avaliarGravacao(analise, duracaoInformadaS);
+      evento(avaliacao.ok ? 'gravacao_analisada' : 'gravacao_com_problema', avaliacao.ok ? 'info' : 'erro', {
+        ...avaliacao,
+        video: analise.video,
+        audio: analise.audio,
+        bytes: analise.bytes,
+        cliente: estatisticas,
+      });
+    } catch (erroAnalise) {
+      evento('gravacao_sem_analise', 'aviso', { erro: erroAnalise.message, cliente: estatisticas });
+    }
 
     const fileName = `${process.env.S3_RECORDINGS_FOLDER || 'webrtc-recordings/'}${roomId}_${timestamp}.mp4`;
 
@@ -403,6 +568,7 @@ async function processarGravacao(inputPath, outputPath, roomId, timestamp) {
     await notificarWebhook({ room: roomId, video_url: s3Url, video_key: fileName });
   } catch (error) {
     console.error(`Erro ao processar gravação da sala ${roomId}:`, error);
+    evento('gravacao_falhou', 'erro', { erro: error.message, cliente: estatisticas });
     await notificarWebhook({ room: roomId, error: error.message });
   } finally {
     for (const p of [inputPath, outputPath]) {
@@ -412,40 +578,89 @@ async function processarGravacao(inputPath, outputPath, roomId, timestamp) {
 }
 
 app.post('/api/upload-recording', upload.single('recording'), async (req, res) => {
-  const inputPath  = path.join(tmpdir(), `${randomUUID()}.webm`);
   const outputPath = path.join(tmpdir(), `${randomUUID()}.mp4`);
 
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file uploaded' });
+  }
+
+  // O multer já gravou em disco — a partir daqui o arquivo está seguro no servidor.
+  const { roomId, timestamp } = req.body;
+  const estatisticas = lerEstatisticasDoCliente(req.body.estatisticas);
+  const papel = typeof req.body.papel === 'string' ? req.body.papel.toLowerCase().slice(0, 30) : null;
+
+  telemetria.registrar({
+    sala: roomId, origem: 'servidor', papel, tipo: 'gravacao_recebida', nivel: 'info',
+    dados: { bytes: req.file.size, cliente: estatisticas }, em: Date.now()
+  });
+
+  // Responde imediatamente: o atendente não precisa esperar o FFmpeg + upload ao S3.
+  res.json({ success: true, status: 'processing', room: roomId });
+
+  // Processamento pesado continua em background, independente da conexão do navegador.
+  processarGravacao(req.file.path, outputPath, roomId, timestamp, estatisticas, papel);
+});
+
+// Limite simples por IP para a rota do teste de equipamento, que é pública.
+const DIAGNOSTICO_JANELA_MS = 10 * 60 * 1000;
+const DIAGNOSTICO_MAX_NA_JANELA = 10;
+const diagnosticoPorIp = new Map();
+
+function ipDe(req) {
+  return String(req.headers['x-real-ip'] || req.socket.remoteAddress || '');
+}
+
+function limitarDiagnostico(req, res, next) {
+  const agora = Date.now();
+  const ip = ipDe(req);
+  const recentes = (diagnosticoPorIp.get(ip) || []).filter(t => agora - t < DIAGNOSTICO_JANELA_MS);
+  if (recentes.length >= DIAGNOSTICO_MAX_NA_JANELA) {
+    return res.status(429).json({ error: 'Muitos testes seguidos. Aguarde alguns minutos.' });
+  }
+  recentes.push(agora);
+  diagnosticoPorIp.set(ip, recentes);
+  next();
+}
+
+// Teste de equipamento: o navegador grava 10 segundos do mesmo jeito que grava
+// a chamada e o servidor diz o que recebeu. Nada vai para o S3 e o arquivo é
+// apagado na hora — o que interessa é saber se o vídeo chega com quadros.
+app.post('/api/diagnostico/gravacao', limitarDiagnostico, uploadDiagnostico.single('gravacao'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'Nenhum arquivo enviado.' });
+  }
+
+  const duracaoInformadaS = Number(req.body.duracao_ms) > 0 ? Number(req.body.duracao_ms) / 1000 : null;
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'No file uploaded' });
-    }
-
-    // Grava o buffer em disco — a partir daqui o arquivo já está seguro no servidor
-    await new Promise((resolve, reject) => {
-      const ws = createWriteStream(inputPath);
-      ws.on('finish', resolve);
-      ws.on('error', reject);
-      ws.end(req.file.buffer);
+    const analise = await analisarMidia(req.file.path);
+    res.json({
+      ...avaliarGravacao(analise, duracaoInformadaS),
+      video: analise.video,
+      audio: analise.audio,
+      bytes: analise.bytes,
+      formato: analise.formato,
     });
+  } catch (erro) {
+    res.status(422).json({ ok: false, problemas: ['arquivo_ilegivel'], erro: erro.message });
+  } finally {
+    unlink(req.file.path, () => {});
+  }
+});
 
-    const { roomId, timestamp } = req.body;
-
-    // Responde imediatamente: o atendente não precisa esperar o FFmpeg + upload ao S3.
-    res.json({ success: true, status: 'processing', room: roomId });
-
-    // Processamento pesado continua em background, independente da conexão do navegador.
-    processarGravacao(inputPath, outputPath, roomId, timestamp);
-  } catch (error) {
-    if (!res.headersSent) {
-      res.status(500).json({
-        error: 'Failed to upload recording',
-        message: error.message
+// Arquivo acima do limite: o multer rejeita antes de chegar à rota. Sem este
+// tratamento o Express devolvia uma página de erro em HTML e a gravação
+// sumia sem deixar rastro de por quê.
+app.use((erro, req, res, next) => {
+  if (erro instanceof multer.MulterError) {
+    if (req.path === '/api/upload-recording') {
+      telemetria.registrar({
+        sala: req.body && req.body.roomId, origem: 'servidor', tipo: 'gravacao_recusada', nivel: 'erro',
+        dados: { motivo: erro.code, limite_mb: GRAVACAO_MAX_MB }, em: Date.now()
       });
     }
-    for (const p of [inputPath, outputPath]) {
-      unlink(p, () => {});
-    }
+    return res.status(erro.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: erro.message, code: erro.code });
   }
+  next(erro);
 });
 
 const PORT = process.env.PORT || 3000;
