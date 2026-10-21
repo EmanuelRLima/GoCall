@@ -165,8 +165,12 @@ function desenharVideoEncaixado(contexto, video, x, y, largura, altura) {
   );
 }
 
-const GRAVACAO_LARGURA = 1920;
-const GRAVACAO_ALTURA = 1080;
+// 1280x720: as câmeras entregam no máximo 720p e, em 1920x1080, quase metade
+// da imagem gravada era faixa preta. Codificar Full HD em tempo real era o que
+// pesava no computador do intérprete (gravação a 5-14 quadros/s numa máquina
+// modesta, em 21/10/2026). A taxa acompanha a área, com folga para os sinais.
+const GRAVACAO_LARGURA = 1280;
+const GRAVACAO_ALTURA = 720;
 const GRAVACAO_FPS = 30;
-const GRAVACAO_BITS_VIDEO = 2500000;
+const GRAVACAO_BITS_VIDEO = 1500000;
 const GRAVACAO_BITS_AUDIO = 128000;

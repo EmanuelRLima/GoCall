@@ -111,7 +111,7 @@ Formato: `{PASTA_CONFIGURADA}/{ID_DA_SALA}_{TIMESTAMP}.webm`
 
 ## ⚠️ Notas importantes
 
-1. **Tamanho máximo**: `GRAVACAO_MAX_MB` (padrão 1500 MB, cerca de 1h20 a 2,5 Mbps). O `client_max_body_size` do nginx na frente precisa ser maior
+1. **Tamanho máximo**: `GRAVACAO_MAX_MB` (padrão 1500 MB, cerca de 2h com a gravação em 1280x720 a 1,5 Mbps). O `client_max_body_size` do nginx na frente precisa ser maior
 2. **Codec**: Chrome e Edge gravam MP4; Firefox grava WebM
 3. **Custos AWS**: Lembre-se que uploads e armazenamento no S3 têm custos associados
 4. **Segurança**: Nunca commite o arquivo `.env` com suas credenciais (já está no .gitignore)
