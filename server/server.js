@@ -196,6 +196,14 @@ wss.on('connection', (ws) => {
         case 'join-room': {
           const roomId = data.room;
           const prevRoomId = clientRoom.get(clientId);
+          // Pedido repetido da mesma conexão (dois cliques em "Entrar" enquanto
+          // o navegador pedia a câmera): tratar como troca de sala avisava
+          // saída e entrada ao outro lado, que renegociava duas vezes e levava
+          // 20 s para conectar.
+          if (prevRoomId === roomId && rooms.has(roomId) && rooms.get(roomId).has(clientId)) {
+            eventoDoServidor(clientId, 'entrada_repetida', 'info', {});
+            break;
+          }
           if (prevRoomId && rooms.has(prevRoomId)) {
             const prevRoom = rooms.get(prevRoomId);
             prevRoom.delete(clientId);
@@ -579,6 +587,18 @@ app.post('/api/upload-recording', upload.single('recording'), async (req, res) =
   const { roomId, timestamp } = req.body;
   const estatisticas = lerEstatisticasDoCliente(req.body.estatisticas);
   const papel = typeof req.body.papel === 'string' ? req.body.papel.toLowerCase().slice(0, 30) : null;
+
+  // A gravação é automática e só do intérprete. Um trecho gravado pelo surdo
+  // (havia um botão de gravar na tela dele) chegava aqui e o webhook trocava
+  // a gravação do atendimento por ele.
+  if (papel && papel !== 'interprete') {
+    unlink(req.file.path, () => {});
+    telemetria.registrar({
+      sala: roomId, origem: 'servidor', papel, tipo: 'gravacao_ignorada', nivel: 'aviso',
+      dados: { motivo: 'papel', bytes: req.file.size }, em: Date.now()
+    });
+    return res.status(403).json({ error: 'Só o intérprete grava a chamada.' });
+  }
 
   telemetria.registrar({
     sala: roomId, origem: 'servidor', papel, tipo: 'gravacao_recebida', nivel: 'info',

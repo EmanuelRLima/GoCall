@@ -131,9 +131,15 @@ function criarRelogioDeQuadros(fps, aoTique, aoUsarReserva) {
 
 function escolherFormatoDeGravacao() {
   if (typeof MediaRecorder.isTypeSupported !== 'function') return '';
+  // H.264 antes de tudo: costuma ter codificador na placa de vídeo e toca
+  // em qualquer aparelho. Pedir só "video/mp4" deixava o navegador escolher, e
+  // o Edge escolhia VP9, codificado pelo processador: num computador modesto a
+  // gravação saiu com 5 quadros por segundo dos 30 desenhados.
   const candidatos = [
+    'video/mp4;codecs=avc1,mp4a.40.2',
+    'video/mp4;codecs=avc1,opus',
+    'video/mp4;codecs=avc1',
     'video/mp4',
-    'video/mp4;codecs=h264,aac',
     'video/webm;codecs=vp9,opus',
     'video/webm;codecs=vp8,opus',
     'video/webm'

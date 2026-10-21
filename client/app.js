@@ -74,7 +74,18 @@ let salaParaVoltar = null;
 let relogioMonitor = null;
 let relogioSozinho = null;
 let entrouNaSalaEm = null;
+let sozinhoDesde = null;
 let avisouSozinho = false;
+let entrandoNaSala = false;
+
+// Carga do processador ('nominal', 'fair', 'serious' ou 'critical'), quando o
+// navegador informa. É o que separa "a rede travou" de "o computador não deu
+// conta" quando o vídeo de um lado para de sair.
+let pressaoDaCpu = null;
+let piorPressaoDaCpu = null;
+let ultimaAmostraDeQualidade = 0;
+const INTERVALO_AMOSTRA_QUALIDADE_MS = 60000;
+const ORDEM_DA_PRESSAO = ['nominal', 'fair', 'serious', 'critical'];
 
 // Quem ficou sozinho espera este tempo antes de encerrar: um F5 do surdo ou
 // uma troca de rede derrubavam a chamada na hora, com o intérprete indo para
@@ -132,7 +143,6 @@ const videosGrid  = document.getElementById('videosGrid');
 const roomLabel   = document.getElementById('roomLabel');
 const muteBtn     = document.getElementById('muteBtn');
 const videoBtn    = document.getElementById('videoBtn');
-const recordBtn   = document.getElementById('recordBtn');
 const encerradaEl     = document.getElementById('encerrada');
 const encerradaTexto  = document.getElementById('encerradaTexto');
 const statusElement = document.getElementById('status');
@@ -662,8 +672,6 @@ async function tratarMensagem(texto) {
     case 'recording-started':
       if (data.recorderId !== myId) {
         roomIsRecording = true;
-        recordBtn.disabled = true;
-        recordBtn.style.opacity = '0.5';
         showStatus((peerRotulos.get(data.recorderId) || 'Outro participante') + ' está gravando...', 'info');
       }
       break;
@@ -671,15 +679,27 @@ async function tratarMensagem(texto) {
     case 'recording-stopped':
       if (data.recorderId !== myId) {
         roomIsRecording = false;
-        recordBtn.disabled = false;
-        recordBtn.style.opacity = '1';
         showStatus('Gravação finalizada', 'info');
       }
       break;
   }
 }
 
+// O pedido de câmera pode levar segundos (a pessoa ainda vai tocar em
+// "Permitir"), e um segundo clique em "Entrar" nesse meio-tempo abria duas
+// câmeras e entrava duas vezes na sala. Foi o que atrasou em 20 s a conexão
+// de uma chamada em 21/10/2026.
 async function joinRoom() {
+  if (entrandoNaSala || currentRoom) return;
+  entrandoNaSala = true;
+  try {
+    await entrarNaSala();
+  } finally {
+    entrandoNaSala = false;
+  }
+}
+
+async function entrarNaSala() {
   const room = roomIdInput.value.trim();
   if (!room) {
     showLobbyStatus('Informe o ID da sala', 'error');
@@ -745,6 +765,7 @@ async function joinRoom() {
 
   currentRoom = room;
   entrouNaSalaEm = Date.now();
+  sozinhoDesde = null;
   avisouSozinho = false;
   limparChat();
   sendMessage({ type: 'join-room', room, papel: papelNaChamada });
@@ -1166,40 +1187,44 @@ function pararMonitor() {
 async function monitorarChamada() {
   if (!currentRoom && !salaParaVoltar) return;
 
-  if (!avisouSozinho && peerConnections.size === 0 && entrouNaSalaEm && Date.now() - entrouNaSalaEm > 90000) {
+  // Conta desde que ficou sozinho, não desde que entrou: quem perde o outro
+  // lado depois de 8 minutos de chamada não está sozinho há 8 minutos.
+  if (peerConnections.size > 0) {
+    sozinhoDesde = null;
+  } else if (!sozinhoDesde) {
+    sozinhoDesde = Date.now();
+  } else if (!avisouSozinho && Date.now() - sozinhoDesde > 90000) {
     avisouSozinho = true;
-    registrarEvento('sozinho_na_sala', 'aviso', { segundos: Math.round((Date.now() - entrouNaSalaEm) / 1000) });
+    registrarEvento('sozinho_na_sala', 'aviso', { segundos: Math.round((Date.now() - sozinhoDesde) / 1000) });
   }
+
+  const amostrar = Date.now() - ultimaAmostraDeQualidade >= INTERVALO_AMOSTRA_QUALIDADE_MS;
+  const amostras = [];
 
   for (const [peerId, pc] of peerConnections) {
     const info = infoDosPares.get(peerId);
     if (!info || pc.connectionState !== 'connected') continue;
 
-    let quadros = null;
-    let bytes = 0;
-    let enviados = 0;
+    let medidas;
     try {
-      const stats = await pc.getStats();
-      stats.forEach(r => {
-        const tipo = r.kind || r.mediaType;
-        if (r.type === 'inbound-rtp' && tipo === 'video') {
-          quadros = (quadros || 0) + (r.framesDecoded || 0);
-          bytes += r.bytesReceived || 0;
-        }
-        if (r.type === 'outbound-rtp' && tipo === 'video') {
-          enviados += r.framesEncoded || 0;
-        }
-      });
+      medidas = await lerEstatisticas(pc);
     } catch (e) {
       continue;
     }
-    if (quadros === null) continue;
 
     const anterior = info.amostra;
-    info.amostra = { quadros, bytes, enviados };
+    info.amostra = medidas;
+    if (amostrar) amostras.push({ par: papelDe(peerId), ...resumirMedidas(medidas, anterior) });
     if (!anterior) continue;
 
-    const parado = quadros === anterior.quadros && !info.cameraDesligadaPeloPar;
+    vigiarEnvio(peerId, pc, info, medidas, anterior);
+
+    const quadros = medidas.recebido.quadros;
+    const bytes = medidas.recebido.bytes;
+    const enviados = medidas.enviado.quadros;
+    if (quadros === null) continue;
+
+    const parado = quadros === anterior.recebido.quadros && !info.cameraDesligadaPeloPar;
     if (parado) {
       info.checagensSemQuadro++;
       if (info.checagensSemQuadro === 2 && !info.videoParado) {
@@ -1210,8 +1235,8 @@ async function monitorarChamada() {
         // bytes chegando sem quadro decodificado é problema de decodificação
         // deste lado; nada chegando é o outro lado que não envia (ou a rede).
         registrarEvento('video_remoto_parado', 'aviso', {
-          bytes_chegando: bytes > anterior.bytes,
-          enviando_daqui: enviados > anterior.enviados,
+          bytes_chegando: bytes > anterior.recebido.bytes,
+          enviando_daqui: enviados > anterior.enviado.quadros,
           ...rota
         });
       }
@@ -1225,6 +1250,135 @@ async function monitorarChamada() {
       info.videoParado = false;
       info.checagensSemQuadro = 0;
     }
+  }
+
+  if (amostrar && amostras.length) {
+    ultimaAmostraDeQualidade = Date.now();
+    registrarEvento('qualidade_da_chamada', 'info', {
+      pares: amostras,
+      cpu: pressaoDaCpu,
+      pior_cpu: piorPressaoDaCpu,
+      aba: document.visibilityState,
+      gravando: isRecording
+    });
+    piorPressaoDaCpu = pressaoDaCpu;
+  }
+}
+
+function papelDe(peerId) {
+  return (peerRotulos.get(peerId) || 'participante').toLowerCase();
+}
+
+// O que sai e o que chega de vídeo nesta conexão, e o que a câmera entrega.
+async function lerEstatisticas(pc) {
+  const stats = await pc.getStats();
+  const medidas = {
+    em: Date.now(),
+    recebido: { quadros: null, bytes: 0, fps: null, largura: null, altura: null },
+    enviado: { quadros: 0, bytes: 0, fps: null, largura: null, altura: null, limitacao: null, codificador: null, pela_placa: null },
+    camera: { fps: null, largura: null, altura: null }
+  };
+  stats.forEach(r => {
+    const tipo = r.kind || r.mediaType;
+    if (tipo !== 'video') return;
+    if (r.type === 'inbound-rtp') {
+      medidas.recebido.quadros = (medidas.recebido.quadros || 0) + (r.framesDecoded || 0);
+      medidas.recebido.bytes += r.bytesReceived || 0;
+      medidas.recebido.fps = r.framesPerSecond ?? medidas.recebido.fps;
+      medidas.recebido.largura = r.frameWidth ?? medidas.recebido.largura;
+      medidas.recebido.altura = r.frameHeight ?? medidas.recebido.altura;
+    } else if (r.type === 'outbound-rtp') {
+      medidas.enviado.quadros += r.framesEncoded || 0;
+      medidas.enviado.bytes += r.bytesSent || 0;
+      medidas.enviado.fps = r.framesPerSecond ?? medidas.enviado.fps;
+      medidas.enviado.largura = r.frameWidth ?? medidas.enviado.largura;
+      medidas.enviado.altura = r.frameHeight ?? medidas.enviado.altura;
+      // "cpu": o navegador reduziu o vídeo porque o computador não dá conta;
+      // "bandwidth": porque a rede não dá conta.
+      medidas.enviado.limitacao = r.qualityLimitationReason ?? medidas.enviado.limitacao;
+      medidas.enviado.codificador = r.encoderImplementation ?? medidas.enviado.codificador;
+      if (typeof r.powerEfficientEncoder === 'boolean') medidas.enviado.pela_placa = r.powerEfficientEncoder;
+    } else if (r.type === 'media-source') {
+      medidas.camera.fps = r.framesPerSecond ?? medidas.camera.fps;
+      medidas.camera.largura = r.width ?? medidas.camera.largura;
+      medidas.camera.altura = r.height ?? medidas.camera.altura;
+    }
+  });
+  return medidas;
+}
+
+function resumirMedidas(medidas, anterior) {
+  const segundos = anterior ? (medidas.em - anterior.em) / 1000 : 0;
+  const kbps = (agora, antes) => (segundos > 0 ? Math.round(((agora - antes) * 8) / segundos / 1000) : null);
+  const { quadros, bytes, ...envio } = medidas.enviado;
+  return {
+    envio: { ...envio, kbps: anterior ? kbps(bytes, anterior.enviado.bytes) : null },
+    recebimento: {
+      fps: medidas.recebido.fps,
+      largura: medidas.recebido.largura,
+      altura: medidas.recebido.altura,
+      kbps: anterior ? kbps(medidas.recebido.bytes, anterior.recebido.bytes) : null
+    },
+    camera: medidas.camera
+  };
+}
+
+// O lado que para de enviar é o único que sabe por quê. Antes só o outro
+// lado registrava "o vídeo não está chegando", sem dizer se faltou câmera,
+// processador ou rede.
+function vigiarEnvio(peerId, pc, info, medidas, anterior) {
+  const video = localStream && localStream.getVideoTracks()[0];
+  const parado = !isVideoMuted && !!video && video.readyState === 'live' && medidas.enviado.quadros === anterior.enviado.quadros;
+
+  if (parado) {
+    info.checagensSemEnviar = (info.checagensSemEnviar || 0) + 1;
+    if (info.checagensSemEnviar === 2 && !info.envioParado) {
+      info.envioParado = true;
+      info.envioParadoDesde = Date.now();
+      descreverRota(pc).then(rota => registrarEvento('video_local_parado', 'aviso', {
+        par: papelDe(peerId),
+        bytes_saindo: medidas.enviado.bytes > anterior.enviado.bytes,
+        limitacao: medidas.enviado.limitacao,
+        codificador: medidas.enviado.codificador,
+        pela_placa: medidas.enviado.pela_placa,
+        camera: { ...medidas.camera, sem_imagem: video.muted },
+        cpu: pressaoDaCpu,
+        aba: document.visibilityState,
+        gravando: isRecording,
+        ...rota
+      }));
+    }
+    return;
+  }
+
+  if (info.envioParado) {
+    registrarEvento('video_local_voltou', 'info', {
+      par: papelDe(peerId),
+      segundos_parado: Math.round((Date.now() - info.envioParadoDesde) / 1000),
+      limitacao: medidas.enviado.limitacao,
+      cpu: pressaoDaCpu
+    });
+  }
+  info.envioParado = false;
+  info.checagensSemEnviar = 0;
+}
+
+function observarPressaoDaCpu() {
+  if (typeof PressureObserver === 'undefined') return;
+  try {
+    const observador = new PressureObserver((registros) => {
+      const ultimo = registros[registros.length - 1];
+      if (!ultimo) return;
+      pressaoDaCpu = ultimo.state;
+      if (ORDEM_DA_PRESSAO.indexOf(pressaoDaCpu) > ORDEM_DA_PRESSAO.indexOf(piorPressaoDaCpu)) {
+        piorPressaoDaCpu = pressaoDaCpu;
+      }
+    });
+    // Num iframe de outro domínio só funciona se a página que embute liberar
+    // "compute-pressure"; sem isso a promessa é recusada e seguimos sem.
+    observador.observe('cpu', { sampleInterval: 2000 }).catch(() => {});
+  } catch (e) {
+    // Navegador sem suporte: as amostras saem com cpu nula.
   }
 }
 
@@ -1295,14 +1449,6 @@ function toggleVideo() {
 }
 
 // ── Gravação ────────────────────────────────────────────────────────────
-
-function toggleRecording() {
-  if (!isRecording) {
-    startRecording();
-  } else {
-    stopRecording();
-  }
-}
 
 // Sem um gesto na página o navegador pode deixar o AudioContext suspenso, e o
 // resume() fica pendurado em vez de falhar — a gravação nem começava. Espera
@@ -1567,8 +1713,6 @@ async function startRecording() {
     registrarEvento('gravacao_iniciada', 'info', { tipo_mime: estatisticasDaGravacao.tipo_mime });
     iniciarVigiaDaGravacao();
 
-    recordBtn.classList.add('recording');
-    atualizarBotaoAlternavel(recordBtn, { icone: '⏹️', rotulo: 'Parar a gravação', ativo: true });
     showStatus('Gravando todos os participantes...', 'success');
   } catch (error) {
     registrarEvento('gravacao_nao_iniciou', 'erro', {
@@ -1588,8 +1732,6 @@ function stopRecording() {
   if (mediaRecorder && isRecording && mediaRecorder.state !== 'inactive') {
     isRecording = false;
     mediaRecorder.stop();
-    recordBtn.classList.remove('recording');
-    atualizarBotaoAlternavel(recordBtn, { icone: '⏺️', rotulo: 'Iniciar gravação', ativo: false });
     return;
   }
 
@@ -1702,10 +1844,18 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('message', (evento) => {
   if (!isEmbedMode || window.parent === window) return;
   if (evento.source !== window.parent) return;
-  if (!evento.data || evento.data.type !== 'ilibras-encerrar-chamada') return;
+  const tipo = evento.data && evento.data.type;
 
-  salaEncerrada = true;
-  hangup('encerrado_pelo_interprete', { encerrarSala: true });
+  if (tipo === 'ilibras-encerrar-chamada') {
+    salaEncerrada = true;
+    hangup('encerrado_pelo_interprete', { encerrarSala: true });
+  } else if (tipo === 'ilibras-sair-da-chamada') {
+    // "Remover Intérprete": o iLibras desmontava a chamada sem avisar e a
+    // gravação até ali se perdia. Agora ela é finalizada e enviada, e a
+    // sala continua aberta para o próximo intérprete.
+    salaEncerrada = true;
+    hangup('interprete_removido');
+  }
 });
 
 window.addEventListener('pagehide', () => { paginaSaindo = true; });
@@ -1719,7 +1869,6 @@ window.addEventListener('beforeunload', (e) => {
 if (isEmbedMode) {
   document.body.style.background = 'transparent';
   if (lobbyEl) lobbyEl.style.display = 'none';
-  if (recordBtn) recordBtn.style.display = 'none';
 }
 
 async function hangup(motivo = 'manual', { encerrarSala = false } = {}) {
@@ -1752,10 +1901,6 @@ async function hangup(motivo = 'manual', { encerrarSala = false } = {}) {
   isRecording = false;
   roomIsRecording = false;
   lastRecordingResult = null;
-  recordBtn.disabled = false;
-  recordBtn.style.opacity = '1';
-  recordBtn.classList.remove('recording');
-  atualizarBotaoAlternavel(recordBtn, { icone: '⏺️', rotulo: 'Iniciar gravação', ativo: false });
 
   isAudioMuted = false;
   isVideoMuted = false;
@@ -1844,11 +1989,11 @@ joinBtn.addEventListener('click', joinRoom);
 roomIdInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !joinBtn.disabled) joinRoom(); });
 muteBtn.addEventListener('click', toggleAudio);
 videoBtn.addEventListener('click', toggleVideo);
-recordBtn.addEventListener('click', toggleRecording);
 chatBtn.addEventListener('click', alternarChat);
 chatFecharBtn.addEventListener('click', fecharChat);
 chatForm.addEventListener('submit', enviarMensagemChat);
 document.addEventListener('pointerdown', liberarSom);
 document.addEventListener('keydown', liberarSom);
 
+observarPressaoDaCpu();
 connectWebSocket();
