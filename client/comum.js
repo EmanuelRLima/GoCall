@@ -174,3 +174,6 @@ const GRAVACAO_ALTURA = 720;
 const GRAVACAO_FPS = 30;
 const GRAVACAO_BITS_VIDEO = 1500000;
 const GRAVACAO_BITS_AUDIO = 128000;
+// A gravação sobe em pedaços durante a chamada. Cinco segundos (~1 MB) é o
+// máximo que se perde se a aba fechar de repente.
+const GRAVACAO_PEDACO_MS = 5000;

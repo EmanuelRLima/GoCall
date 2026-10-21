@@ -35,6 +35,19 @@ let estatisticasDaGravacao = null;
 // A sala da gravação fica guardada à parte: se a conexão com o servidor cair
 // no meio, currentRoom some, e a gravação subiria sem dizer de que sala é.
 let salaDaGravacao = null;
+// A gravação sobe em pedaços durante a chamada, não mais inteira no fim: os
+// 260 MB de uma chamada de 21 minutos levavam mais que os 3 minutos que a
+// tela esperava, e o vídeo se perdia. Cada pedaço fica na fila até o
+// servidor confirmar.
+let gravacaoId = null;
+let proximoPedaco = 0;
+const pedacosParaEnviar = [];
+let enviandoPedacos = false;
+let aoEsvaziarFilaDePedacos = null;
+let envioDaGravacaoRecusado = false;
+let gravacaoFinalizada = false;
+let envioAtrasado = false;
+let ultimoErroDoEnvio = null;
 
 const peerConnections = new Map();
 // O que cada conexão precisa lembrar além do RTCPeerConnection: quem fez a
@@ -1622,6 +1635,13 @@ async function startRecording() {
   try {
     recordedChunks = [];
     salaDaGravacao = currentRoom;
+    gravacaoId = novoIdDeGravacao();
+    proximoPedaco = 0;
+    pedacosParaEnviar.length = 0;
+    envioDaGravacaoRecusado = false;
+    gravacaoFinalizada = false;
+    envioAtrasado = false;
+    ultimoErroDoEnvio = null;
     recordingCanvas = document.createElement('canvas');
     recordingCanvas.width = GRAVACAO_LARGURA;
     recordingCanvas.height = GRAVACAO_ALTURA;
@@ -1679,9 +1699,11 @@ async function startRecording() {
     estatisticasDaGravacao.tipo_mime = recorder.mimeType || formato || null;
 
     recorder.ondataavailable = (event) => {
-      if (event.data.size > 0) {
-        recordedChunks.push(event.data);
-      }
+      if (!event.data.size) return;
+      // Fora do iLibras o arquivo ainda é baixado no fim, então guarda tudo;
+      // dentro dele, cada pedaço vai embora assim que o servidor confirma.
+      if (!isEmbedMode) recordedChunks.push(event.data);
+      guardarPedacoDaGravacao(event.data);
     };
 
     recorder.onerror = (event) => {
@@ -1699,16 +1721,14 @@ async function startRecording() {
       sendMessage({ type: 'recording-stopped', recorderId: myId });
       roomIsRecording = false;
       const mimeType = recorder.mimeType || 'video/mp4';
-      const blob = new Blob(recordedChunks, { type: mimeType });
-      const duration = Date.now() - recordingStartTime;
-      showStatus(`Gravação finalizada (${Math.round(duration/1000)}s). Enviando vídeo, não feche esta janela...`, 'info');
-      await uploadRecording(blob, mimeType);
+      showStatus('Gravação finalizada. Enviando o final do vídeo, não feche esta janela...', 'info');
+      await concluirEnvioDaGravacao(mimeType);
       recordingCanvas = null;
       recordingContext = null;
       mediaRecorder = null;
     };
 
-    recorder.start(1000);
+    recorder.start(GRAVACAO_PEDACO_MS);
     sendMessage({ type: 'recording-started', recorderId: myId });
     registrarEvento('gravacao_iniciada', 'info', { tipo_mime: estatisticasDaGravacao.tipo_mime });
     iniciarVigiaDaGravacao();
@@ -1740,87 +1760,234 @@ function stopRecording() {
   // senão o intérprete fica travado na tela do atendimento.
   isRecording = false;
   pararRecursosDaGravacao();
-  if (recordingUploadResolve) {
-    recordingUploadResolve(null);
+  // O gravador que parou sozinho já mandou o que tinha; se o fim do envio
+  // ainda está em curso, é ele quem responde quando terminar.
+  if (recordingUploadResolve && !isUploadingRecording) {
+    recordingUploadResolve(lastRecordingResult);
     recordingUploadResolve = null;
   }
 }
 
-async function uploadRecording(blob, mimeType) {
-  isUploadingRecording = true;
-  const extension = mimeType && mimeType.includes('webm') ? 'webm' : 'mp4';
-  const sala = salaDaGravacao || currentRoom;
+function novoIdDeGravacao() {
+  if (window.crypto && typeof crypto.randomUUID === 'function') return crypto.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
+}
 
-  const montarFormulario = () => {
-    const formData = new FormData();
-    // Campos antes do arquivo: o multer lê na ordem, e uma recusa do arquivo
-    // (grande demais) só consegue dizer de que sala era se a sala já chegou.
-    formData.append('roomId', sala);
-    formData.append('timestamp', Date.now());
-    formData.append('papel', papelNaChamada);
-    formData.append('estatisticas', JSON.stringify(estatisticasDaGravacao || {}));
-    formData.append('recording', blob, `recording_${Date.now()}.${extension}`);
-    return formData;
-  };
+function esperarMs(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
-  const concluir = (resultado) => {
-    if (recordingUploadResolve) {
-      recordingUploadResolve(resultado);
-      recordingUploadResolve = null;
-    }
-    return resultado;
-  };
+// Vão junto de cada pedaço: se a aba fechar no meio, o servidor fecha a
+// gravação sem o aviso final e ainda sabe o que o navegador viu até ali.
+function estatisticasParaEnvio() {
+  const e = estatisticasDaGravacao;
+  if (!e) return '{}';
+  const copia = { ...e, duracao_ms: e.duracao_ms || (Date.now() - recordingStartTime) };
+  delete copia.oculta_desde;
+  return JSON.stringify(copia);
+}
+
+function guardarPedacoDaGravacao(blob) {
+  if (envioDaGravacaoRecusado) return;
+  pedacosParaEnviar.push({
+    id: gravacaoId,
+    sala: salaDaGravacao || currentRoom,
+    seq: proximoPedaco++,
+    blob,
+    estatisticas: estatisticasParaEnvio()
+  });
+  vigiarAtrasoDoEnvio();
+  enviarPedacosDaGravacao();
+}
+
+function bytesPendentesDaGravacao() {
+  return pedacosParaEnviar.reduce((soma, pedaco) => soma + pedaco.blob.size, 0);
+}
+
+// Seis pedaços na fila são 30 segundos de atraso: internet lenta ou caída do
+// lado do intérprete. Fica registrado uma vez, e de novo quando zera.
+function vigiarAtrasoDoEnvio() {
+  const pendentes = pedacosParaEnviar.length;
+  if (!envioAtrasado && pendentes >= 6) {
+    envioAtrasado = true;
+    registrarEvento('gravacao_envio_atrasado', 'aviso', {
+      pendentes,
+      bytes_pendentes: bytesPendentesDaGravacao(),
+      erro: ultimoErroDoEnvio
+    });
+  } else if (envioAtrasado && pendentes <= 1) {
+    envioAtrasado = false;
+    registrarEvento('gravacao_envio_em_dia', 'info', {});
+  }
+}
+
+// Depois do "Encerrar" o iLibras mostra quanto falta e só desiste de esperar
+// se o envio parar de andar.
+function avisarProgressoDoEnvio() {
+  if (!encerrando || window.parent === window) return;
+  window.parent.postMessage({
+    type: 'webrtc-gravacao-progresso',
+    pendentes: pedacosParaEnviar.length,
+    bytes_pendentes: bytesPendentesDaGravacao()
+  }, '*');
+}
+
+async function enviarPedacoDaGravacao(pedaco) {
+  const formulario = new FormData();
+  // Campos antes do arquivo: o multer só conhece os que vieram antes dele.
+  formulario.append('id', pedaco.id);
+  formulario.append('sala', pedaco.sala);
+  formulario.append('papel', papelNaChamada);
+  formulario.append('seq', String(pedaco.seq));
+  formulario.append('tipo_mime', pedaco.blob.type || '');
+  formulario.append('estatisticas', pedaco.estatisticas);
+  formulario.append('pedaco', pedaco.blob, `${pedaco.seq}.parte`);
+
+  const controle = new AbortController();
+  const limite = setTimeout(() => controle.abort(), 120000);
+  try {
+    const resposta = await fetch('/api/gravacao/pedaco', { method: 'POST', body: formulario, signal: controle.signal });
+    if (resposta.ok) return { ok: true };
+    // Recusa do nginx chega em HTML, não JSON.
+    const corpo = await resposta.json().catch(() => ({}));
+    // 4xx não melhora repetindo (gravação já fechada, grande demais). 5xx e o
+    // 502 do nginx durante um reinício do servidor, sim.
+    const definitivo = resposta.status >= 400 && resposta.status < 500 && ![408, 429].includes(resposta.status);
+    return { ok: false, definitivo, erro: `HTTP ${resposta.status}${corpo.error ? ': ' + corpo.error : ''}` };
+  } catch (erro) {
+    return { ok: false, definitivo: false, erro: erro.name === 'AbortError' ? 'tempo_esgotado' : erro.message };
+  } finally {
+    clearTimeout(limite);
+  }
+}
+
+// Um pedaço por vez e em ordem: o servidor só aceita o começo de uma gravação
+// pelo pedaço 0, que traz o cabeçalho do vídeo.
+async function enviarPedacosDaGravacao() {
+  if (enviandoPedacos) return;
+  enviandoPedacos = true;
+  let falhasSeguidas = 0;
 
   try {
-    // A gravação só existe nesta aba: uma falha de rede no fim da chamada a
-    // perdia de vez. Tenta de novo com espera crescente antes de desistir.
-    let ultimoErro = null;
-    for (let tentativa = 1; tentativa <= 3; tentativa++) {
-      try {
-        const response = await fetch('/api/upload-recording', { method: 'POST', body: montarFormulario() });
-        // Recusa do nginx (413) chega em HTML, não JSON.
-        const result = await response.json().catch(() => ({}));
+    while (pedacosParaEnviar.length && !envioDaGravacaoRecusado) {
+      const resultado = await enviarPedacoDaGravacao(pedacosParaEnviar[0]);
 
-        if (response.ok) {
-          // O servidor já respondeu ao receber o arquivo bruto — o processamento
-          // (transcodificação + envio ao S3) continua em segundo plano no servidor
-          // e o vídeo é anexado ao atendimento automaticamente quando terminar.
-          lastRecordingResult = { url: result.url ?? null, key: result.key ?? null };
-          showStatus('Gravação recebida. Processamento continua em segundo plano.', 'success');
-
-          if (!isEmbedMode) {
-            const blobUrl = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = blobUrl;
-            a.download = `recording_${sala}_${Date.now()}.${extension}`;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            URL.revokeObjectURL(blobUrl);
-          }
-
-          return concluir(lastRecordingResult);
-        }
-
-        ultimoErro = `HTTP ${response.status}${result.error ? ': ' + result.error : ''}`;
-        // 4xx não melhora repetindo (arquivo grande demais, pedido inválido).
-        if (response.status < 500) break;
-      } catch (erroDeRede) {
-        ultimoErro = erroDeRede.message;
+      if (resultado.ok) {
+        pedacosParaEnviar.shift();
+        falhasSeguidas = 0;
+        avisarProgressoDoEnvio();
+      } else if (resultado.definitivo) {
+        envioDaGravacaoRecusado = true;
+        ultimoErroDoEnvio = String(resultado.erro).slice(0, 300);
+        registrarEvento('gravacao_envio_falhou', 'erro', {
+          erro: ultimoErroDoEnvio,
+          seq: pedacosParaEnviar[0].seq,
+          pedacos_perdidos: pedacosParaEnviar.length,
+          tipo_mime: pedacosParaEnviar[0].blob.type || null
+        });
+        pedacosParaEnviar.length = 0;
+      } else {
+        // O pedaço só existe aqui: espera e tenta de novo, sem desistir,
+        // enquanto a página estiver aberta.
+        ultimoErroDoEnvio = String(resultado.erro).slice(0, 300);
+        falhasSeguidas++;
+        vigiarAtrasoDoEnvio();
+        await esperarMs(Math.min(30000, 2000 * 2 ** Math.min(falhasSeguidas - 1, 4)));
       }
-      if (tentativa < 3) await new Promise(resolve => setTimeout(resolve, 3000 * tentativa));
+      vigiarAtrasoDoEnvio();
+    }
+  } finally {
+    enviandoPedacos = false;
+  }
+
+  if (!pedacosParaEnviar.length && aoEsvaziarFilaDePedacos) {
+    const avisar = aoEsvaziarFilaDePedacos;
+    aoEsvaziarFilaDePedacos = null;
+    avisar();
+  }
+}
+
+function baixarGravacao(blob, mimeType) {
+  const extension = mimeType && mimeType.includes('webm') ? 'webm' : 'mp4';
+  const blobUrl = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = `recording_${salaDaGravacao || currentRoom}_${Date.now()}.${extension}`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(blobUrl);
+}
+
+// Depois do stop: espera só o que ainda está na fila (normalmente o último
+// pedaço) e avisa o servidor que acabou. O servidor monta o vídeo e segue com
+// a conversão e o S3 sem ninguém esperando.
+async function concluirEnvioDaGravacao(mimeType) {
+  isUploadingRecording = true;
+  const id = gravacaoId;
+  const total = proximoPedaco;
+
+  try {
+    if (pedacosParaEnviar.length || enviandoPedacos) {
+      avisarProgressoDoEnvio();
+      await new Promise((resolve) => {
+        aoEsvaziarFilaDePedacos = resolve;
+        enviarPedacosDaGravacao();
+      });
     }
 
-    registrarEvento('gravacao_envio_falhou', 'erro', {
-      erro: String(ultimoErro).slice(0, 300),
-      bytes: blob.size,
-      tipo_mime: mimeType
-    });
-    showStatus('Erro ao enviar gravação: ' + ultimoErro, 'error');
-    return concluir(null);
+    const enviada = !envioDaGravacaoRecusado && total > 0;
+    if (enviada) {
+      let avisada = false;
+      for (let tentativa = 1; tentativa <= 3 && !avisada; tentativa++) {
+        try {
+          const resposta = await fetch('/api/gravacao/finalizar', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id, total, estatisticas: estatisticasDaGravacao || {} })
+          });
+          avisada = resposta.ok;
+        } catch (e) {}
+        if (!avisada && tentativa < 3) await esperarMs(2000 * tentativa);
+      }
+      // Sem esse aviso o servidor fecha a gravação sozinho depois de alguns
+      // minutos sem pedaço novo: o vídeo sai do mesmo jeito, só mais tarde.
+    }
+    gravacaoFinalizada = true;
+
+    if (enviada) {
+      showStatus('Gravação recebida. Processamento continua em segundo plano.', 'success');
+      if (!isEmbedMode && recordedChunks.length) baixarGravacao(new Blob(recordedChunks, { type: mimeType }), mimeType);
+      lastRecordingResult = { url: null, key: null, enviada: true };
+    } else {
+      showStatus('Erro ao enviar gravação: ' + (ultimoErroDoEnvio || 'nada foi gravado'), 'error');
+      lastRecordingResult = null;
+    }
+
+    if (recordingUploadResolve) {
+      recordingUploadResolve(lastRecordingResult);
+      recordingUploadResolve = null;
+    }
   } finally {
     isUploadingRecording = false;
+    recordedChunks = [];
   }
+}
+
+// A página está indo embora com a gravação aberta (aba fechada, F5, tela do
+// atendimento desmontada): o que já chegou ao servidor vira o vídeo agora,
+// em vez de esperar a inatividade. O sendBeacon é o único envio que
+// sobrevive à saída; vai como texto para não depender de preflight.
+function fecharGravacaoAoSair() {
+  if (!gravacaoId || gravacaoFinalizada || proximoPedaco === 0 || !navigator.sendBeacon) return;
+  gravacaoFinalizada = true;
+  try {
+    navigator.sendBeacon('/api/gravacao/finalizar', new Blob([JSON.stringify({
+      id: gravacaoId,
+      motivo: 'pagina_fechada',
+      estatisticas: JSON.parse(estatisticasParaEnvio())
+    })], { type: 'text/plain' }));
+  } catch (e) {}
 }
 
 document.addEventListener('visibilitychange', () => {
@@ -1858,7 +2025,10 @@ window.addEventListener('message', (evento) => {
   }
 });
 
-window.addEventListener('pagehide', () => { paginaSaindo = true; });
+window.addEventListener('pagehide', () => {
+  paginaSaindo = true;
+  fecharGravacaoAoSair();
+});
 
 window.addEventListener('beforeunload', (e) => {
   if (!isUploadingRecording) return;
@@ -1886,6 +2056,7 @@ async function hangup(motivo = 'manual', { encerrarSala = false } = {}) {
   registrarEvento('saiu', 'info', { motivo, gravando: isRecording });
 
   let recordingResult = null;
+  const gravou = isRecording || gravacaoId !== null;
 
   if (isRecording) {
     showStatus('Enviando gravação, não feche esta janela...', 'info');
@@ -1932,7 +2103,10 @@ async function hangup(motivo = 'manual', { encerrarSala = false } = {}) {
       type: 'webrtc-hangup',
       reason: motivo,
       recording_url: recordingResult ? recordingResult.url : null,
-      recording_key: recordingResult ? recordingResult.key : null
+      recording_key: recordingResult ? recordingResult.key : null,
+      // Só faz sentido para quem gravava: diz ao iLibras se o vídeo chegou
+      // ao servidor, para ele não afirmar que sim quando não chegou.
+      gravacao_enviada: gravou ? Boolean(recordingResult && recordingResult.enviada) : null
     }, '*');
   }
 

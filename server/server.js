@@ -13,6 +13,7 @@ import { randomUUID } from 'crypto';
 import { montarServidoresIce, temTurn } from './ice.js';
 import { analisarMidia, avaliarGravacao, conferirDecodificacao, converterGravacao } from './midia.js';
 import { criarTelemetria, normalizarEventoDoCliente } from './telemetria.js';
+import { criarGravacoesEmPedacos, idDeGravacaoValido } from './pedacos.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -83,6 +84,47 @@ const upload = multer({
   }),
   limits: {
     fileSize: GRAVACAO_MAX_MB * 1024 * 1024
+  }
+});
+
+// Pedaços da gravação, mandados durante a chamada (ver pedacos.js). Ficam fora
+// do /tmp porque precisam sobreviver a um reinício do servidor no meio da
+// chamada. Cinco segundos a 1,6 Mbps dão 1 MB; o limite é folga para
+// navegador que grave com taxa maior.
+const GRAVACAO_PASTA = process.env.GRAVACAO_DIR || path.join(__dirname, '..', 'gravacoes');
+const GRAVACAO_INATIVIDADE_MIN = Number(process.env.GRAVACAO_INATIVIDADE_MIN) > 0 ? Number(process.env.GRAVACAO_INATIVIDADE_MIN) : 10;
+const PEDACO_MAX_MB = 50;
+
+const gravacoes = criarGravacoesEmPedacos({
+  pasta: GRAVACAO_PASTA,
+  inatividadeMs: GRAVACAO_INATIVIDADE_MIN * 60 * 1000,
+  maxBytes: GRAVACAO_MAX_MB * 1024 * 1024,
+  aoFinalizar: async (gravacao) => {
+    telemetria.registrar({
+      sala: gravacao.sala, origem: 'servidor', papel: gravacao.papel, tipo: 'gravacao_recebida',
+      nivel: gravacao.quantos_faltando ? 'aviso' : 'info',
+      dados: {
+        bytes: gravacao.bytes,
+        pedacos: gravacao.pedacos,
+        faltando: gravacao.faltando,
+        quantos_faltando: gravacao.quantos_faltando,
+        fechada_por: gravacao.motivo,
+        cliente: gravacao.estatisticas,
+      },
+      em: Date.now()
+    });
+    const saida = path.join(tmpdir(), `${randomUUID()}.mp4`);
+    return processarGravacao(gravacao.caminho, saida, gravacao.sala, gravacao.inicio, gravacao.estatisticas, gravacao.papel);
+  }
+});
+
+const uploadPedaco = multer({
+  storage: multer.diskStorage({
+    destination: gravacoes.pastaTemporaria,
+    filename: (req, file, cb) => cb(null, `${randomUUID()}.parte`)
+  }),
+  limits: {
+    fileSize: PEDACO_MAX_MB * 1024 * 1024
   }
 });
 
@@ -510,12 +552,34 @@ function lerEstatisticasDoCliente(texto) {
   }
 }
 
+// Mais de uma gravação na mesma sala acontece: F5 do intérprete no meio da
+// chamada, "Remover Intérprete" e outro assume. O iLibras guarda um vídeo por
+// atendimento e vale o último aviso, e a gravação que fecha por inatividade
+// chega minutos depois — um trecho curto tomaria o lugar da chamada inteira.
+// Fica vinculada a mais longa; as outras continuam no S3, com a chave no
+// evento gravacao_salva.
+const GRAVACAO_MAIS_LONGA_VALIDADE_MS = 24 * 60 * 60 * 1000;
+const gravacaoMaisLongaPorSala = new Map();
+
+function deveVincularGravacao(sala, duracaoS) {
+  const agora = Date.now();
+  for (const [chave, registro] of gravacaoMaisLongaPorSala) {
+    if (agora - registro.em > GRAVACAO_MAIS_LONGA_VALIDADE_MS) gravacaoMaisLongaPorSala.delete(chave);
+  }
+  const anterior = gravacaoMaisLongaPorSala.get(sala);
+  if (anterior && anterior.duracao > duracaoS) return false;
+  gravacaoMaisLongaPorSala.set(sala, { duracao: duracaoS, em: agora });
+  return true;
+}
+
 // Transcodifica e envia ao S3 em background — não bloqueia a resposta ao navegador.
+// Devolve false quando o vídeo não chegou ao S3.
 async function processarGravacao(inputPath, outputPath, roomId, timestamp, estatisticas = {}, papel = null) {
   const duracaoInformadaS = Number(estatisticas.duracao_ms) > 0 ? Number(estatisticas.duracao_ms) / 1000 : null;
   const evento = (tipo, nivel, dados) => telemetria.registrar({
     sala: roomId, origem: 'servidor', papel, tipo, nivel, dados, em: Date.now()
   });
+  let duracaoS = duracaoInformadaS || 0;
 
   try {
     const conversao = await converterGravacao(inputPath, outputPath);
@@ -533,6 +597,7 @@ async function processarGravacao(inputPath, outputPath, roomId, timestamp, estat
       const analise = await analisarMidia(outputPath);
       const decodificacao = await conferirDecodificacao(outputPath).catch(() => null);
       const avaliacao = avaliarGravacao(analise, duracaoInformadaS, decodificacao);
+      if (avaliacao.duracao) duracaoS = avaliacao.duracao;
       evento(avaliacao.ok ? 'gravacao_analisada' : 'gravacao_com_problema', avaliacao.ok ? 'info' : 'erro', {
         ...avaliacao,
         video: analise.video,
@@ -564,11 +629,17 @@ async function processarGravacao(inputPath, outputPath, roomId, timestamp, estat
     const s3Url = result.Location ||
       `https://${bucket}.s3.${region}.amazonaws.com/${fileName}`;
 
-    await notificarWebhook({ room: roomId, video_url: s3Url, video_key: fileName });
+    const vinculada = deveVincularGravacao(roomId, duracaoS);
+    evento('gravacao_salva', 'info', { video_key: fileName, duracao: duracaoS, vinculada });
+    if (vinculada) {
+      await notificarWebhook({ room: roomId, video_url: s3Url, video_key: fileName });
+    }
+    return true;
   } catch (error) {
     console.error(`Erro ao processar gravação da sala ${roomId}:`, error);
     evento('gravacao_falhou', 'erro', { erro: error.message, cliente: estatisticas });
     await notificarWebhook({ room: roomId, error: error.message });
+    return false;
   } finally {
     for (const p of [inputPath, outputPath]) {
       unlink(p, () => {});
@@ -610,6 +681,83 @@ app.post('/api/upload-recording', upload.single('recording'), async (req, res) =
 
   // Processamento pesado continua em background, independente da conexão do navegador.
   processarGravacao(req.file.path, outputPath, roomId, timestamp, estatisticas, papel);
+});
+
+// Envio antigo, o arquivo inteiro no fim da chamada. Continua de pé para a
+// aba que abriu antes da troca e ainda roda o cliente velho.
+//
+// O novo: um pedaço a cada poucos segundos durante a chamada, e no fim o
+// aviso de que acabou. A ordem dos campos importa — o multer só conhece os
+// que vieram antes do arquivo.
+app.post('/api/gravacao/pedaco', uploadPedaco.single('pedaco'), async (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'Nenhum pedaço enviado.' });
+  }
+
+  const papel = typeof req.body.papel === 'string' ? req.body.papel.toLowerCase().slice(0, 30) : null;
+  const sala = typeof req.body.sala === 'string' ? req.body.sala.trim().slice(0, 120) : '';
+  const seq = Number(req.body.seq);
+
+  if (papel && papel !== 'interprete') {
+    gravacoes.descartarArquivo(req.file.path);
+    if (seq === 0) {
+      telemetria.registrar({
+        sala, origem: 'servidor', papel, tipo: 'gravacao_ignorada', nivel: 'aviso',
+        dados: { motivo: 'papel', bytes: req.file.size }, em: Date.now()
+      });
+    }
+    return res.status(403).json({ error: 'Só o intérprete grava a chamada.' });
+  }
+
+  try {
+    const resultado = await gravacoes.receberPedaco({
+      id: req.body.id,
+      sala,
+      papel,
+      seq,
+      arquivo: req.file.path,
+      bytes: req.file.size,
+      tipoMime: typeof req.body.tipo_mime === 'string' ? req.body.tipo_mime.slice(0, 100) : null,
+      estatisticas: lerEstatisticasDoCliente(req.body.estatisticas),
+    });
+    res.json({ ok: true, ...resultado });
+  } catch (erro) {
+    gravacoes.descartarArquivo(req.file.path);
+    if (erro.status) {
+      if (erro.status === 413) {
+        telemetria.registrar({
+          sala, origem: 'servidor', papel, tipo: 'gravacao_recusada', nivel: 'erro',
+          dados: { motivo: erro.codigo, limite_mb: GRAVACAO_MAX_MB }, em: Date.now()
+        });
+      }
+      return res.status(erro.status).json({ error: erro.codigo });
+    }
+    console.error(`Falha ao guardar pedaço da gravação ${req.body.id}:`, erro);
+    res.status(500).json({ error: 'falha_ao_guardar' });
+  }
+});
+
+// O aviso da página fechando chega pelo sendBeacon, como texto.
+app.post('/api/gravacao/finalizar', express.text({ type: 'text/plain', limit: '100kb' }), async (req, res) => {
+  let corpo = req.body || {};
+  if (typeof corpo === 'string') {
+    try { corpo = JSON.parse(corpo); } catch (e) { corpo = {}; }
+  }
+  if (!idDeGravacaoValido(corpo.id)) {
+    return res.status(400).json({ error: 'id_invalido' });
+  }
+
+  try {
+    const resultado = await gravacoes.finalizar(corpo.id, {
+      total: Number.isInteger(corpo.total) ? corpo.total : null,
+      estatisticas: lerEstatisticasDoCliente(JSON.stringify(corpo.estatisticas || {})),
+      motivo: corpo.motivo === 'pagina_fechada' ? 'pagina_fechada' : 'cliente',
+    });
+    res.json(resultado);
+  } catch (erro) {
+    console.error(`Falha ao finalizar a gravação ${corpo.id}:`, erro);
+    res.status(500).json({ error: 'falha_ao_finalizar' });
+  }
 });
 
 // Limite simples por IP para a rota do teste de equipamento, que é pública.
@@ -677,11 +825,24 @@ app.use((erro, req, res, next) => {
         sala: req.body && req.body.roomId, origem: 'servidor', tipo: 'gravacao_recusada', nivel: 'erro',
         dados: { motivo: erro.code, limite_mb: GRAVACAO_MAX_MB }, em: Date.now()
       });
+    } else if (req.path === '/api/gravacao/pedaco') {
+      telemetria.registrar({
+        sala: req.body && req.body.sala, origem: 'servidor', tipo: 'gravacao_recusada', nivel: 'erro',
+        dados: { motivo: erro.code, limite_mb_pedaco: PEDACO_MAX_MB, seq: req.body && req.body.seq }, em: Date.now()
+      });
     }
     return res.status(erro.code === 'LIMIT_FILE_SIZE' ? 413 : 400).json({ error: erro.message, code: erro.code });
   }
   next(erro);
 });
+
+// Gravações que estavam em curso quando o servidor caiu continuam de onde
+// pararam; as que ficaram sem pedaço novo por muito tempo (aba fechada sem
+// aviso, computador travado) são fechadas com o que chegou.
+await gravacoes.recuperar();
+setInterval(() => {
+  gravacoes.varrer().catch(erro => console.error('Falha ao fechar gravações paradas:', erro));
+}, 60000);
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
